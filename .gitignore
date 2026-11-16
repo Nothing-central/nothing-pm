@@ -1,0 +1,13 @@
+/target
+
+# upstream sources kept locally as build references — not part of the project
+pnpm-main.zip
+yarn-master.zip
+berry-master.zip
+bun-main.zip
+jsr-main.zip
+node-semver-main.zip
+better-sqlite3-master.zip
+
+# installer scratch
+dist/
