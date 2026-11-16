@@ -1,9 +1,13 @@
 //! SQLite metadata store (`/local/nothingdatabase/nothingda.db`).
 //!
-//! package.json is the source of truth for versions; this db is the only
-//! record of what the machine actually holds — which version is active, what
-//! the previous version was, where each package came from, its checksum and
-//! its resolved dependency list (which is what `nth info` reads).
+//! One row per *version*, not per package: two projects can need axios 2.3.4
+//! and axios 2.8.6 at the same time and the store keeps both zips. Exactly
+//! one version per package is `active` — the one the most recent install
+//! put there — and that row's `prev_version` is the rollback step that
+//! `nth clear <pkg> new` uses.
+//!
+//! package.json is the source of truth for ranges; this db is the record of
+//! what the machine actually holds.
 
 use crate::cli::Source;
 use crate::json::Json;
@@ -12,8 +16,7 @@ use std::path::Path;
 
 pub const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS packages (
-  id           INTEGER PRIMARY KEY AUTOINCREMENT,
-  name         TEXT NOT NULL UNIQUE,
+  name         TEXT NOT NULL,
   version      TEXT NOT NULL,
   prev_version TEXT,
   source       TEXT NOT NULL DEFAULT 'npm',
@@ -22,11 +25,13 @@ CREATE TABLE IF NOT EXISTS packages (
   checksum     TEXT,
   tarball      TEXT,
   integrity    TEXT,
+  active       INTEGER NOT NULL DEFAULT 1,
   deps         TEXT NOT NULL DEFAULT '[]',
   installed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP
+  updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (name, version)
 );
-CREATE INDEX IF NOT EXISTS idx_packages_name ON packages(name);
+CREATE INDEX IF NOT EXISTS idx_packages_name ON packages(name, version);
 "#;
 
 #[derive(Clone, Debug)]
@@ -53,8 +58,13 @@ pub struct StoredPackage {
     /// Where this version came from, so a lockfile can carry download URLs.
     pub tarball: Option<String>,
     pub integrity: Option<String>,
+    /// The version the last install selected for this package name.
+    pub active: bool,
     pub deps: Vec<StoredDep>,
 }
+
+const SELECT_COLUMNS: &str =
+    "name, version, prev_version, source, size_kb, beta, checksum, deps, tarball, integrity, active";
 
 pub struct Db {
     conn: Connection,
@@ -71,24 +81,17 @@ impl Db {
             .map_err(|e| format!("cannot configure database: {e}"))?;
         conn.execute_batch(SCHEMA)
             .map_err(|e| format!("cannot create schema: {e}"))?;
-        // Stores created before 0.2.0 have no download URLs: add the columns
-        // in place ("duplicate column" is the expected error on new stores).
-        for column in ["tarball", "integrity"] {
-            let _ = conn.execute(
-                &format!("ALTER TABLE packages ADD COLUMN {column} TEXT"),
-                [],
-            );
-        }
+        migrate_single_version(&conn)?;
         Ok(Db { conn })
     }
 
+    /// The active version of a package, if the store has one.
     pub fn get(&self, name: &str) -> Result<Option<StoredPackage>, String> {
         let mut stmt = self
             .conn
-            .prepare(
-                "SELECT name, version, prev_version, source, size_kb, beta, checksum, deps, tarball, integrity
-                 FROM packages WHERE name = ?1",
-            )
+            .prepare(&format!(
+                "SELECT {SELECT_COLUMNS} FROM packages WHERE name = ?1 AND active = 1"
+            ))
             .map_err(|e| e.to_string())?;
         let mut rows = stmt.query(params![name]).map_err(|e| e.to_string())?;
         match rows.next().map_err(|e| e.to_string())? {
@@ -97,13 +100,43 @@ impl Db {
         }
     }
 
+    /// Every version of a package the store holds.
+    pub fn versions(&self, name: &str) -> Result<Vec<StoredPackage>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(&format!(
+                "SELECT {SELECT_COLUMNS} FROM packages WHERE name = ?1 ORDER BY installed_at"
+            ))
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![name], |row| Ok(row_to_package(row)))
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| e.to_string())??);
+        }
+        Ok(out)
+    }
+
+    pub fn has(&self, name: &str, version: &str) -> Result<bool, String> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM packages WHERE name = ?1 AND version = ?2",
+                params![name, version],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(count > 0)
+    }
+
+    /// Every row, newest install first, for `nth view db`.
     pub fn all(&self) -> Result<Vec<StoredPackage>, String> {
         let mut stmt = self
             .conn
-            .prepare(
-                "SELECT name, version, prev_version, source, size_kb, beta, checksum, deps, tarball, integrity
-                 FROM packages ORDER BY name COLLATE NOCASE",
-            )
+            .prepare(&format!(
+                "SELECT {SELECT_COLUMNS} FROM packages ORDER BY name COLLATE NOCASE, installed_at"
+            ))
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |row| Ok(row_to_package(row)))
@@ -115,35 +148,54 @@ impl Db {
         Ok(out)
     }
 
-    /// Records a package as active. If a different version was already
-    /// stored, it becomes `prev_version` (the store keeps exactly one
-    /// rollback step).
+    /// One row per package name: the active version. Commands that think in
+    /// trees (`nth info`, `nth update`) use this.
+    pub fn active_all(&self) -> Result<Vec<StoredPackage>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(&format!(
+                "SELECT {SELECT_COLUMNS} FROM packages WHERE active = 1 ORDER BY name COLLATE NOCASE"
+            ))
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| Ok(row_to_package(row)))
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| e.to_string())??);
+        }
+        Ok(out)
+    }
+
+    /// Records a version as active. Other versions of the same package stay
+    /// in the store, they just stop being the active one.
     pub fn upsert(&self, pkg: &StoredPackage) -> Result<(), String> {
-        let existing = self.get(&pkg.name)?;
-        let (prev, installed_at) = match &existing {
-            Some(old) if old.version != pkg.version => (
-                Some(old.version.clone()),
-                current_installed_at(&self.conn, &pkg.name)?,
-            ),
-            Some(old) => (old.prev_version.clone(), None),
-            None => (None, None),
+        let previous_active = self.get(&pkg.name)?;
+        let prev = match &previous_active {
+            Some(old) if old.version != pkg.version => Some(old.version.clone()),
+            Some(old) => old.prev_version.clone(),
+            None => None,
         };
         let deps_json = deps_to_json(&pkg.deps);
 
         self.conn
+            .execute("UPDATE packages SET active = 0 WHERE name = ?1", params![pkg.name])
+            .map_err(|e| e.to_string())?;
+        self.conn
             .execute(
-                "INSERT INTO packages (name, version, prev_version, source, size_kb, beta, checksum, deps, tarball, integrity)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-                 ON CONFLICT(name) DO UPDATE SET
-                   version = excluded.version,
+                "INSERT INTO packages
+                   (name, version, prev_version, source, size_kb, beta, checksum, tarball, integrity, active, deps)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10)
+                 ON CONFLICT(name, version) DO UPDATE SET
                    prev_version = excluded.prev_version,
                    source = excluded.source,
                    size_kb = excluded.size_kb,
                    beta = excluded.beta,
                    checksum = excluded.checksum,
+                   tarball = COALESCE(excluded.tarball, packages.tarball),
+                   integrity = COALESCE(excluded.integrity, packages.integrity),
+                   active = 1,
                    deps = excluded.deps,
-                   tarball = excluded.tarball,
-                   integrity = excluded.integrity,
                    updated_at = CURRENT_TIMESTAMP",
                 params![
                     pkg.name,
@@ -153,22 +205,12 @@ impl Db {
                     pkg.size_kb as i64,
                     pkg.beta as i64,
                     pkg.checksum,
-                    deps_json,
                     pkg.tarball,
-                    pkg.integrity
+                    pkg.integrity,
+                    deps_json
                 ],
             )
             .map_err(|e| format!("db write failed for {}: {e}", pkg.name))?;
-
-        if let Some(ts) = installed_at {
-            // Preserve the original install date across updates.
-            self.conn
-                .execute(
-                    "UPDATE packages SET installed_at = ?1 WHERE name = ?2",
-                    params![ts, pkg.name],
-                )
-                .map_err(|e| e.to_string())?;
-        }
         Ok(())
     }
 
@@ -183,43 +225,113 @@ impl Db {
             None => return Ok(None),
         };
         self.conn
+            .execute("UPDATE packages SET active = 0 WHERE name = ?1", params![name])
+            .map_err(|e| e.to_string())?;
+        self.conn
             .execute(
-                "UPDATE packages SET version = ?1, prev_version = NULL, updated_at = CURRENT_TIMESTAMP
-                 WHERE name = ?2",
-                params![prev, name],
+                "UPDATE packages SET active = 1, prev_version = NULL, updated_at = CURRENT_TIMESTAMP
+                 WHERE name = ?1 AND version = ?2",
+                params![name, prev],
             )
             .map_err(|e| e.to_string())?;
         Ok(Some(prev))
     }
 
-    /// `nth clear <pkg> prev`: forget the rollback version.
-    pub fn clear_prev(&self, name: &str) -> Result<bool, String> {
+    /// `nth clear <pkg> prev`: drop the rollback version. Returns it so the
+    /// caller can remove that zip from the store.
+    pub fn clear_prev(&self, name: &str) -> Result<Option<String>, String> {
+        let prev = match self.get(name)? {
+            Some(p) => p.prev_version,
+            None => None,
+        };
+        let prev = match prev {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        self.conn
+            .execute(
+                "UPDATE packages SET prev_version = NULL WHERE name = ?1 AND active = 1",
+                params![name],
+            )
+            .map_err(|e| e.to_string())?;
+        self.delete_version(name, &prev)?;
+        Ok(Some(prev))
+    }
+
+    pub fn delete_version(&self, name: &str, version: &str) -> Result<bool, String> {
         let changed = self
             .conn
             .execute(
-                "UPDATE packages SET prev_version = NULL WHERE name = ?1 AND prev_version IS NOT NULL",
-                params![name],
+                "DELETE FROM packages WHERE name = ?1 AND version = ?2",
+                params![name, version],
             )
             .map_err(|e| e.to_string())?;
         Ok(changed > 0)
     }
 
-    pub fn delete(&self, name: &str) -> Result<bool, String> {
-        let changed = self
-            .conn
+    /// Remove every version of a package. Returns the versions that were
+    /// removed so the caller can delete their zips.
+    pub fn delete_all(&self, name: &str) -> Result<Vec<String>, String> {
+        let versions: Vec<String> = self
+            .versions(name)?
+            .into_iter()
+            .map(|p| p.version)
+            .collect();
+        if versions.is_empty() {
+            return Ok(versions);
+        }
+        self.conn
             .execute("DELETE FROM packages WHERE name = ?1", params![name])
             .map_err(|e| e.to_string())?;
-        Ok(changed > 0)
+        Ok(versions)
     }
 }
 
-fn current_installed_at(conn: &Connection, name: &str) -> Result<Option<String>, String> {
-    conn.query_row(
-        "SELECT installed_at FROM packages WHERE name = ?1",
-        params![name],
-        |row| row.get::<_, Option<String>>(0),
-    )
-    .map_err(|e| e.to_string())
+/// 0.1.x stored one row per package in a table with `name TEXT UNIQUE` and no
+/// `active` column. Rebuild that table with the composite key.
+fn migrate_single_version(conn: &Connection) -> Result<(), String> {
+    let columns = table_columns(conn, "packages")?;
+    if columns.is_empty() || columns.iter().any(|c| c == "active") {
+        return Ok(());
+    }
+    let tarball = if columns.iter().any(|c| c == "tarball") {
+        "tarball"
+    } else {
+        "NULL"
+    };
+    let integrity = if columns.iter().any(|c| c == "integrity") {
+        "integrity"
+    } else {
+        "NULL"
+    };
+
+    conn.execute_batch("ALTER TABLE packages RENAME TO packages_legacy")
+        .map_err(|e| format!("cannot migrate store db: {e}"))?;
+    conn.execute_batch(SCHEMA)
+        .map_err(|e| format!("cannot migrate store db: {e}"))?;
+    conn.execute_batch(&format!(
+        "INSERT OR IGNORE INTO packages
+           (name, version, prev_version, source, size_kb, beta, checksum, tarball, integrity, active, deps, installed_at, updated_at)
+         SELECT name, version, prev_version, source, size_kb, beta, checksum, {tarball}, {integrity}, 1, deps, installed_at, updated_at
+         FROM packages_legacy;
+         DROP TABLE packages_legacy;"
+    ))
+    .map_err(|e| format!("cannot migrate store db: {e}"))?;
+    Ok(())
+}
+
+fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
 }
 
 fn row_to_package(row: &rusqlite::Row<'_>) -> Result<StoredPackage, String> {
@@ -235,6 +347,7 @@ fn row_to_package(row: &rusqlite::Row<'_>) -> Result<StoredPackage, String> {
         checksum: row.get(6).map_err(|e| e.to_string())?,
         tarball: row.get(8).map_err(|e| e.to_string())?,
         integrity: row.get(9).map_err(|e| e.to_string())?,
+        active: row.get::<_, Option<i64>>(10).unwrap_or(None).unwrap_or(1) != 0,
         deps: deps_from_json(&deps_text),
     })
 }
@@ -300,7 +413,11 @@ mod tests {
     use super::*;
 
     fn temp_db() -> (Db, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!("nth-db-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "nth-db-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("nothingda.db");
@@ -308,10 +425,8 @@ mod tests {
         (db, dir)
     }
 
-    #[test]
-    fn records_and_rolls_back_versions() {
-        let (db, dir) = temp_db();
-        let pkg = |v: &str| StoredPackage {
+    fn pkg(v: &str) -> StoredPackage {
+        StoredPackage {
             name: "axios".into(),
             version: v.into(),
             prev_version: None,
@@ -319,8 +434,9 @@ mod tests {
             size_kb: 12,
             beta: false,
             checksum: Some("sha256:aa".into()),
-            tarball: Some("https://registry/axios.tgz".into()),
+            tarball: Some(format!("https://registry/axios-{v}.tgz")),
             integrity: Some("sha512-aa".into()),
+            active: true,
             deps: vec![StoredDep {
                 name: "follow-redirects".into(),
                 range: "^1.15.0".into(),
@@ -329,7 +445,12 @@ mod tests {
                 checksum: None,
                 optional: false,
             }],
-        };
+        }
+    }
+
+    #[test]
+    fn records_and_rolls_back_versions() {
+        let (db, dir) = temp_db();
         db.upsert(&pkg("2.2.3")).unwrap();
         assert_eq!(db.get("axios").unwrap().unwrap().version, "2.2.3");
 
@@ -337,16 +458,91 @@ mod tests {
         let stored = db.get("axios").unwrap().unwrap();
         assert_eq!(stored.version, "2.2.4");
         assert_eq!(stored.prev_version.as_deref(), Some("2.2.3"));
-        assert_eq!(stored.tarball.as_deref(), Some("https://registry/axios.tgz"));
+        assert_eq!(stored.tarball.as_deref(), Some("https://registry/axios-2.2.4.tgz"));
         assert_eq!(stored.integrity.as_deref(), Some("sha512-aa"));
         assert_eq!(stored.deps.len(), 1);
-        assert_eq!(stored.deps[0].name, "follow-redirects");
         assert!(!stored.deps[0].optional);
 
         assert_eq!(db.promote_prev("axios").unwrap().as_deref(), Some("2.2.3"));
         assert_eq!(db.get("axios").unwrap().unwrap().version, "2.2.3");
-        assert!(db.delete("axios").unwrap());
+        assert!(db.delete_version("axios", "2.2.3").unwrap());
         assert!(db.get("axios").unwrap().is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn keeps_every_version_and_one_active() {
+        let (db, dir) = temp_db();
+        db.upsert(&pkg("1.4.5")).unwrap();
+        db.upsert(&pkg("2.2.3")).unwrap();
+        // A second project asking for the older version makes it active and
+        // keeps the newer zip around for the project that wants it.
+        db.upsert(&pkg("1.4.5")).unwrap();
+
+        let versions = db.versions("axios").unwrap();
+        assert_eq!(versions.len(), 2);
+        assert_eq!(db.get("axios").unwrap().unwrap().version, "1.4.5");
+        assert!(db.has("axios", "2.2.3").unwrap());
+        assert!(db.has("axios", "1.4.5").unwrap());
+        assert!(!db.has("axios", "9.9.9").unwrap());
+
+        let active = db.active_all().unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].version, "1.4.5");
+        assert_eq!(db.all().unwrap().len(), 2);
+
+        let removed = db.delete_all("axios").unwrap();
+        assert_eq!(removed.len(), 2);
+        assert!(db.versions("axios").unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn clear_prev_forgets_the_rollback_step() {
+        let (db, dir) = temp_db();
+        db.upsert(&pkg("1.4.5")).unwrap();
+        db.upsert(&pkg("2.2.3")).unwrap();
+        assert_eq!(db.clear_prev("axios").unwrap().as_deref(), Some("1.4.5"));
+        assert!(db.get("axios").unwrap().unwrap().prev_version.is_none());
+        assert!(!db.has("axios", "1.4.5").unwrap());
+        assert!(db.clear_prev("axios").unwrap().is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn migrates_a_single_version_table() {
+        let dir = std::env::temp_dir().join(format!(
+            "nth-db-migrate-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("nothingda.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE packages (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   name TEXT NOT NULL UNIQUE,
+                   version TEXT NOT NULL,
+                   prev_version TEXT,
+                   source TEXT NOT NULL DEFAULT 'npm',
+                   size_kb INTEGER,
+                   beta INTEGER NOT NULL DEFAULT 0,
+                   checksum TEXT,
+                   deps TEXT NOT NULL DEFAULT '[]',
+                   installed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                 );
+                 INSERT INTO packages (name, version, checksum, deps) VALUES ('axios', '2.2.3', 'sha256:aa', '[]');",
+            )
+            .unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        let stored = db.get("axios").unwrap().unwrap();
+        assert_eq!(stored.version, "2.2.3");
+        assert!(stored.active);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

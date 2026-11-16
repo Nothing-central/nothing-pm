@@ -13,6 +13,7 @@ every other package manager pings the internet for everything, every time, even 
 - **offline first** — works without internet if packages are already in your store
 - **smart deduplication** — never downloads the same package twice across projects
 - **global local store** — one copy of axios serves every project on your machine
+- **many versions at once** — project A keeps libc 1.4.5 while project B uses 2.2.3; both zips stay, neither overwrites the other
 - **parallel downloads** — up to 20 simultaneous downloads with safe sequential db writes
 - **rollback built in** — every update keeps the previous version, one command to go back
 - **clean projects** — your project stays normal, nothing package manager hides its internals away from you
@@ -80,31 +81,36 @@ nothing package manager maintains a global store at `/local/` on your machine:
 ```
 /local/
   nothingdatabase/
-    nothingda.db          ← metadata for every package ever downloaded
+    nothingda.db          ← metadata for every version ever downloaded
   libraries/
-    axios.zip             ← pure npm code, untouched
-    express.zip
-    react.zip             ← lives here independently, not inside nextjs
-    react-dom.zip
-    nextjs.zip            ← just the nextjs core, small on its own
-    
-    @next/                ← scoped packages get their own folder
-      server.zip
-      hmr.zip
-      env.zip
-      types.zip
-      
+    axios/
+      2.8.6.zip           ← pure npm code, untouched
+      2.3.4.zip           ← another project needs this one; both stay
+    express/
+      4.18.2.zip
+    react/
+      18.3.1.zip          ← lives here independently, not inside nextjs
+    nextjs/
+      14.0.0.zip
+
+    @next/                ← scoped packages get their own scope folder
+      server/
+        14.0.0.zip
+      env/
+        14.0.0.zip
+
     @hono/
-      hono.zip
-      
-    prev/
-      axios.zip           ← previous version, safe for rollback
-      express.zip
+      hono/
+        4.6.3.zip
 ```
 
-every package is its own independent zip. scoped packages like `@next/server` live in a folder named after their scope. nothing is ever bundled together.
+every package *version* is its own independent zip. scoped packages like `@next/server` live under `@next/server/<version>.zip`. nothing is ever bundled together.
 
-this means when nextjs and your other project both need react, there is only ever ONE `react.zip` in the store. nothing package manager fetches react once and every project on your machine uses that same zip forever. deleting nextjs never touches react. updating react never touches nextjs. everything is cleanly isolated.
+this is what lets two projects disagree. project one can need `libc 2.2.3` while project two needs `libc 1.4.5`, and the store holds `libc/2.2.3.zip` and `libc/1.4.5.zip` side by side. neither can overwrite the other, neither has to re-download, and installing one never disturbs the other.
+
+the db marks exactly one version per package as `active` — the one the last install chose — and remembers the previous one for `nth clear <pkg> new`. every other version is kept and shown as `kept` in `nth view db`.
+
+when nextjs and your other project both need react, there is still only one `react/18.3.1.zip`. nothing package manager fetches react once and every project on your machine uses that same zip. deleting nextjs never touches react. everything is cleanly isolated.
 
 the zips contain pure upstream package code exactly as the registry serves it. nothing package manager metadata lives only in `nothingda.db`, never inside the zips themselves.
 
@@ -138,7 +144,7 @@ any other time nothing package manager keeps its hands off the internet complete
 | `nth add axios, jsr @hono/hono` | stock up from mixed registries in one command |
 | `nth update database` | check all stored packages for updates |
 | `nth check updates` | see what updates are available without installing |
-| `nth view db` | see everything in your local store |
+| `nth view db` | see every version in your local store, and which is active |
 | `nth delete <pkg>` | remove a package from the store completely |
 | `nth clear <pkg> prev` | delete the previous version of a package |
 | `nth clear <pkg> new` | roll back to previous version |
@@ -187,7 +193,9 @@ choose (1/2):
 
 ## the lockfile — `agree.db`
 
-nothing package manager's lockfile is a SQLite database called `agree.db`, written next to your `package.json`. it is not a text file full of indentation: it is the same format the store already uses, so it opens in `sqlite3`, it diffs cleanly as a binary artefact, and nothing has to parse it by hand.
+nothing package manager's lockfile is a SQLite database called `agree.db`, written next to your `package.json`. it is not a text file full of indentation: it is the same format the store already uses, so it opens in `sqlite3`, needs no parser of its own, and stays small with thousands of packages.
+
+one thing it is **not**: line-diffable. a SQLite file is a binary; every rewrite touches pages throughout it, so `git diff` shows you «binary files differ» and nothing useful. that is exactly what `nth lock json` is for — commit `agree.json` when you want a lockfile reviewers can read and diff, and keep `agree.db` when you want the machine copy `nth i` replays without parsing anything.
 
 it holds the whole agreed tree: every root range from package.json, every resolved package, its version, source, tarball URL, integrity hash and checksum, its dependencies, and which optional packages were skipped for this platform.
 

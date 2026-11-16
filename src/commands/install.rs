@@ -2,8 +2,10 @@
 
 use super::{context, ensure_packages, fetch_plan, install_plan, lock, stored_source, Context};
 use crate::cli::PackageSpec;
+use crate::http::Client;
 use crate::install as installer;
 use crate::lockfile::Lockfile;
+use crate::registry;
 use crate::project::{self, Manifest};
 use crate::resolver::{Plan, Root};
 use crate::ui;
@@ -65,6 +67,7 @@ pub fn run_install_all(forceall: bool) -> Result<(), String> {
     let (plan, downloaded) = match locked_plan(&ctx, &project, &roots)? {
         Some(plan) => {
             ui::info("agree.db matches package.json — installing the locked versions");
+            let plan = fill_locked_urls(plan)?;
             let downloaded = fetch_plan(&ctx, &plan, false)?;
             (plan, downloaded)
         }
@@ -127,6 +130,54 @@ fn locked_plan(ctx: &Context, project: &Path, roots: &[Root]) -> Result<Option<P
         return Ok(None);
     }
     lockfile.to_plan(&ctx.db)
+}
+
+/// The store is asked first (that is what `to_plan` does). Anything the
+/// store does not have is fetched as the *exact pinned version* from the
+/// registry the lock recorded — npm or jsr — never by re-resolving ranges.
+fn fill_locked_urls(mut plan: Plan) -> Result<Plan, String> {
+    if plan
+        .items
+        .iter()
+        .all(|item| item.in_store || item.tarball.is_some())
+    {
+        return Ok(plan);
+    }
+
+    let client = Client::new();
+    for item in plan.items.iter_mut() {
+        if item.in_store || item.tarball.is_some() {
+            continue;
+        }
+        ui::info(&format!(
+            "{} {} is locked but not in the store, fetching that exact version from {}",
+            item.name,
+            item.version,
+            item.source.as_str()
+        ));
+        let packument = registry::fetch_packument(&client, item.source, &item.name).map_err(|e| {
+            format!(
+                "agree.db pins {} {} but the {} registry could not be read: {}",
+                item.name,
+                item.version,
+                item.source.as_str(),
+                e.message()
+            )
+        })?;
+        let meta = registry::resolve(&packument, Some(&item.version)).map_err(|e| {
+            format!(
+                "agree.db pins {} {}, which no longer exists: {}",
+                item.name,
+                item.version,
+                e.message()
+            )
+        })?;
+        item.tarball = Some(meta.tarball.clone());
+        if item.integrity.is_none() {
+            item.integrity = meta.integrity.clone();
+        }
+    }
+    Ok(plan)
 }
 
 fn refresh_lock(ctx: &Context, project: &Path) {

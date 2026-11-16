@@ -79,26 +79,18 @@ pub fn run(
                 let db = if persist { Db::open(db_path).ok() } else { None };
                 while let Ok((downloaded, record)) = rx.recv() {
                     if persist {
-                        // Archive the version being replaced *before* the new
-                        // zip lands, so `nth clear <pkg> new` can restore it.
-                        // Only this thread touches these files, so the order
-                        // here is the order on disk.
-                        if let Some(db) = &db {
-                            if let Ok(Some(existing)) = db.get(&record.name) {
-                                if existing.version != record.version {
-                                    let _ = crate::store::archive_current_as_prev(
-                                        store,
-                                        &record.name,
-                                    );
-                                }
-                            }
-                        }
-                        if let Err(e) =
-                            crate::store::write_current(store, &downloaded.name, &downloaded.zip)
-                        {
+                        // One zip per version, so a download never overwrites
+                        // another project's copy of the same package. Only
+                        // this thread touches these files.
+                        if let Err(e) = crate::store::write_version(
+                            store,
+                            &downloaded.name,
+                            &downloaded.version,
+                            &downloaded.zip,
+                        ) {
                             eprintln!(
-                                "warning: cannot write {} to the store: {e}",
-                                downloaded.name
+                                "warning: cannot write {} {} to the store: {e}",
+                                downloaded.name, downloaded.version
                             );
                         }
                     }
@@ -172,6 +164,7 @@ pub fn run(
                                 checksum: Some(downloaded.checksum.clone()),
                                 tarball: Some(job.tarball.clone()).filter(|t| !t.is_empty()),
                                 integrity: job.integrity.clone(),
+                                active: true,
                                 deps: job.deps.clone(),
                             };
                             let _ = tx.send((downloaded.clone(), record));

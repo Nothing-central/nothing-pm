@@ -24,13 +24,18 @@ pub fn package_dir(node_modules: &Path, name: &str) -> PathBuf {
     node_modules.join(name)
 }
 
-/// Extract `name` from the store into `node_modules`, replacing whatever was
-/// there before.
-pub fn install_from_store(store: &Store, name: &str, node_modules: &Path) -> io::Result<()> {
-    let bytes = crate::store::read_current(store, name)?.ok_or_else(|| {
+/// Extract one stored version of `name` into `node_modules`, replacing
+/// whatever was there before.
+pub fn install_from_store(
+    store: &Store,
+    name: &str,
+    version: &str,
+    node_modules: &Path,
+) -> io::Result<()> {
+    let bytes = crate::store::read_version(store, name, version)?.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
-            format!("{name} is not in the store"),
+            format!("{name} {version} is not in the store"),
         )
     })?;
     install_bytes(name, &bytes, node_modules)

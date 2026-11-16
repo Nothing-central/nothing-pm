@@ -48,7 +48,7 @@ pub fn run_update() -> Result<(), String> {
 
 fn run(apply: bool) -> Result<(), String> {
     let ctx = context()?;
-    let packages = ctx.db.all()?;
+    let packages = ctx.db.active_all()?;
     if packages.is_empty() {
         ui::warn("store is empty — nothing to check");
         return Ok(());

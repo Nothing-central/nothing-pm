@@ -15,7 +15,7 @@ pub fn run() -> Result<(), String> {
     let ctx = context()?;
     let root = project::project_root()?;
     let manifest = Manifest::read(&root.join("package.json"))?;
-    let stored = ctx.db.all()?;
+    let stored = ctx.db.active_all()?;
 
     let index: HashMap<&str, &StoredPackage> =
         stored.iter().map(|p| (p.name.as_str(), p)).collect();

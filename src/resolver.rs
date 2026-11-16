@@ -274,21 +274,14 @@ impl<'a> Planner<'a> {
                 continue;
             }
 
-            // 1. local store first
-            if let Some(stored) = self.db.get(&req.name).map_err(PlanError::Db)? {
-                let exact_ok = req
-                    .range
-                    .as_deref()
-                    .map(|r| r.trim() == stored.version)
-                    .unwrap_or(false);
-                let usable = if self.forceall {
-                    exact_ok
-                } else {
-                    satisfies(&stored.version, req.range.as_deref())
-                };
-
-                if usable {
-                    let idx = push_stored(&mut items, &stored, req.optional);
+            // 1. local store first: every stored version is a candidate, so
+            // two projects can be served from the same machine without one
+            // of them forcing the other to re-download.
+            let stored_versions = self.db.versions(&req.name).map_err(PlanError::Db)?;
+            if !stored_versions.is_empty() {
+                if let Some(stored) = pick_stored(&stored_versions, req.range.as_deref(), self.forceall)
+                {
+                    let idx = push_stored(&mut items, stored, req.optional);
                     chosen.insert(req.name.clone(), idx);
                     enqueue_deps(&mut queue, idx, &items);
                     continue;
@@ -297,10 +290,14 @@ impl<'a> Planner<'a> {
                 if (self.offline || self.forceall) && !self.forceall {
                     // Offline with a version mismatch: ask (spec §4). An
                     // optional package never interrupts a build to ask.
+                    let fallback = stored_versions
+                        .iter()
+                        .find(|p| p.active)
+                        .unwrap_or_else(|| stored_versions.last().expect("non-empty"));
                     let accept = req.optional
-                        || on_mismatch(&stored.name, &stored.version, req.range.as_deref());
+                        || on_mismatch(&fallback.name, &fallback.version, req.range.as_deref());
                     if accept {
-                        let idx = push_stored(&mut items, &stored, req.optional);
+                        let idx = push_stored(&mut items, fallback, req.optional);
                         chosen.insert(req.name.clone(), idx);
                         enqueue_deps(&mut queue, idx, &items);
                         continue;
@@ -439,6 +436,30 @@ fn platform_error(name: &str, meta: &VersionMeta, platform: &Platform) -> PlanEr
         name: name.to_string(),
         version: meta.version.to_string(),
         platform: platform.label(),
+    }
+}
+
+/// The version to use from what is on disk: the highest one satisfying the
+/// range, or — under `--forceall` — only an exact match.
+fn pick_stored<'a>(
+    versions: &'a [StoredPackage],
+    range: Option<&str>,
+    exact_only: bool,
+) -> Option<&'a StoredPackage> {
+    if exact_only {
+        let wanted = range?.trim();
+        return versions.iter().find(|p| p.version == wanted);
+    }
+    versions
+        .iter()
+        .filter(|p| satisfies(&p.version, range))
+        .max_by(|a, b| compare_versions(&a.version, &b.version))
+}
+
+fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    match (Version::parse(a), Version::parse(b)) {
+        (Ok(x), Ok(y)) => x.cmp(&y),
+        _ => a.cmp(b),
     }
 }
 

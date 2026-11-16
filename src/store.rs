@@ -1,12 +1,13 @@
 //! Turning a registry tarball into a store zip, and moving zips around.
 //!
-//! Store layout (spec §1): one zip per package, named by package name only,
-//! scoped packages in a folder named after their scope, previous versions in
-//! `libraries/prev/`. A zip contains pure upstream code: the tarball's
-//! single top-level `package/` directory is stripped so
-//! `node_modules/axios/index.js` lands where Node expects it.
+//! Store layout (spec §1): one zip per package *version*, under a folder
+//! named after the package — `libraries/axios/2.8.6.zip`. Scoped packages
+//! get a scope folder: `libraries/@next/server/14.0.0.zip`. A zip contains
+//! pure upstream code: the tarball's single top-level `package/` directory
+//! is stripped so `node_modules/axios/index.js` lands where Node expects it.
 
 use crate::config::Store;
+use crate::db::Db;
 use crate::hash;
 use crate::tar;
 use crate::zipstore::{self, ZipEntry};
@@ -85,16 +86,8 @@ fn common_root(entries: &[tar::Entry]) -> Option<String> {
     root.map(|r| format!("{r}/"))
 }
 
-pub fn write_current(store: &Store, name: &str, zip: &[u8]) -> io::Result<()> {
-    let path = store.zip_path(name);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    write_atomic(&path, zip)
-}
-
-pub fn write_prev(store: &Store, name: &str, zip: &[u8]) -> io::Result<()> {
-    let path = store.prev_zip_path(name);
+pub fn write_version(store: &Store, name: &str, version: &str, zip: &[u8]) -> io::Result<()> {
+    let path = store.zip_path(name, version);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -102,17 +95,13 @@ pub fn write_prev(store: &Store, name: &str, zip: &[u8]) -> io::Result<()> {
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let tmp = path.with_extension("tmp");
+    let tmp = path.with_extension("zip.tmp");
     fs::write(&tmp, bytes)?;
     fs::rename(&tmp, path)
 }
 
-pub fn read_current(store: &Store, name: &str) -> io::Result<Option<Vec<u8>>> {
-    read_optional(&store.zip_path(name))
-}
-
-pub fn read_prev(store: &Store, name: &str) -> io::Result<Option<Vec<u8>>> {
-    read_optional(&store.prev_zip_path(name))
+pub fn read_version(store: &Store, name: &str, version: &str) -> io::Result<Option<Vec<u8>>> {
+    read_optional(&store.zip_path(name, version))
 }
 
 fn read_optional(path: &Path) -> io::Result<Option<Vec<u8>>> {
@@ -123,34 +112,30 @@ fn read_optional(path: &Path) -> io::Result<Option<Vec<u8>>> {
     }
 }
 
-/// Move the active zip aside, keeping exactly one previous version.
-pub fn archive_current_as_prev(store: &Store, name: &str) -> io::Result<bool> {
-    let current = store.zip_path(name);
-    if !current.is_file() {
-        return Ok(false);
+pub fn remove_version(store: &Store, name: &str, version: &str) -> io::Result<bool> {
+    remove_if_exists(&store.zip_path(name, version))
+}
+
+/// Remove every stored version of a package, including any pre-0.2 zip, and
+/// the by-now empty folder it lived in.
+pub fn remove_package(store: &Store, name: &str) -> io::Result<bool> {
+    let dir = store.package_dir(name);
+    let mut removed = remove_if_exists(&store.legacy_zip_path(name))?;
+    if dir.is_dir() {
+        fs::remove_dir_all(&dir)?;
+        removed = true;
+        // `libraries/@next` should not linger once its last package is gone.
+        if let Some(scope) = dir.parent() {
+            if scope != store.libraries()
+                && fs::read_dir(scope)
+                    .map(|mut entries| entries.next().is_none())
+                    .unwrap_or(false)
+            {
+                let _ = fs::remove_dir(scope);
+            }
+        }
     }
-    let bytes = fs::read(&current)?;
-    write_prev(store, name, &bytes)?;
-    Ok(true)
-}
-
-/// `nth clear <pkg> new`: the previous zip becomes the active one.
-pub fn promote_prev(store: &Store, name: &str) -> io::Result<bool> {
-    let prev = match read_prev(store, name)? {
-        Some(bytes) => bytes,
-        None => return Ok(false),
-    };
-    write_current(store, name, &prev)?;
-    remove_prev(store, name)?;
-    Ok(true)
-}
-
-pub fn remove_current(store: &Store, name: &str) -> io::Result<bool> {
-    remove_if_exists(&store.zip_path(name))
-}
-
-pub fn remove_prev(store: &Store, name: &str) -> io::Result<bool> {
-    remove_if_exists(&store.prev_zip_path(name))
+    Ok(removed)
 }
 
 fn remove_if_exists(path: &Path) -> io::Result<bool> {
@@ -159,6 +144,34 @@ fn remove_if_exists(path: &Path) -> io::Result<bool> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(e),
     }
+}
+
+/// 0.1.x kept one `libraries/<name>.zip` per package. Move each one to the
+/// versioned path, using the version recorded in the db. Returns how many
+/// files were moved.
+pub fn migrate_legacy(store: &Store, db: &Db) -> io::Result<usize> {
+    let mut moved = 0;
+    for pkg in db.all().unwrap_or_default() {
+        let legacy = store.legacy_zip_path(&pkg.name);
+        let target = store.zip_path(&pkg.name, &pkg.version);
+        if target.is_file() || !legacy.is_file() {
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        match fs::rename(&legacy, &target) {
+            Ok(()) => moved += 1,
+            Err(_) => {
+                // Cross-device or a leftover: copy then drop the original.
+                if fs::copy(&legacy, &target).is_ok() {
+                    let _ = fs::remove_file(&legacy);
+                    moved += 1;
+                }
+            }
+        }
+    }
+    Ok(moved)
 }
 
 #[cfg(test)]

@@ -33,6 +33,9 @@ pub fn context() -> Result<Context, String> {
         .ensure()
         .map_err(|e| format!("cannot prepare store at {}: {e}", store.root.display()))?;
     let db = Db::open(&store.db_path())?;
+    // Pre-0.2 stores hold one zip per package name; move them to the
+    // versioned layout now that the db knows which version they are.
+    let _ = crate::store::migrate_legacy(&store, &db);
     Ok(Context { store, db })
 }
 
@@ -338,7 +341,7 @@ fn install_one(
             return Ok(());
         }
     }
-    installer::install_from_store(&ctx.store, &item.name, node_modules)
+    installer::install_from_store(&ctx.store, &item.name, &item.version, node_modules)
         .map_err(|e| e.to_string())?;
     Ok(())
 }

@@ -253,13 +253,9 @@ impl Lockfile {
     pub fn to_plan(&self, db: &Db) -> Result<Option<Plan>, String> {
         let mut items = Vec::with_capacity(8);
         for pkg in self.packages()? {
-            let in_store = db
-                .get(&pkg.name)?
-                .map(|stored| stored.version == pkg.version)
-                .unwrap_or(false);
-            if !in_store && pkg.tarball.is_none() {
-                return Ok(None);
-            }
+            // The store keeps every version, so "is it here" is a lookup on
+            // the exact (name, version) pair, not "is some version here".
+            let in_store = db.has(&pkg.name, &pkg.version)?;
             items.push(PlanItem {
                 name: pkg.name,
                 version: pkg.version,
