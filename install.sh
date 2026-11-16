@@ -1,5 +1,5 @@
 #!/bin/sh
-# nothing — installer for the nth package manager.
+# nothing package manager — installer for nth.
 #
 #   curl -fsSL https://raw.githubusercontent.com/Nothing-central/nothing-pm/main/install.sh | bash
 #
@@ -25,7 +25,7 @@ BASE_URL="${NTH_BASE_URL:-}"
 
 usage() {
     cat <<'EOF'
-nothing installer — installs the nth package manager
+nothing package manager installer — installs nth
 
 usage: install.sh [--version <tag>] [--dir <path>]
 

@@ -8,7 +8,7 @@ pub fn run_view() -> Result<(), String> {
     let ctx = context()?;
     let packages = ctx.db.all()?;
 
-    ui::info("📦 nothing package store");
+    ui::info("📦 nothing package manager store");
     if packages.is_empty() {
         ui::warn("store is empty — try `nth add axios` or `nth install axios`");
         return Ok(());

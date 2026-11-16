@@ -1,21 +1,21 @@
-# nothing 📦
+# nothing package manager 📦
 
 **The smart package manager for Node, Bun and Deno**
 
-nothing (CLI: `nth`) is a fast, offline-first package manager that actually thinks before it downloads. it maintains a global local store on your machine so packages you've downloaded once are available forever — no internet required.
+nothing package manager (CLI: `nth`) is a fast, offline-first package manager that actually thinks before it downloads. it maintains a global local store on your machine so packages you've downloaded once are available forever — no internet required.
 
 ---
 
-## why nothing?
+## why nothing package manager?
 
-every other package manager pings the internet for everything, every time, even if you installed that exact package yesterday on another project. nothing doesn't do that. nothing favors your local store first and only reaches out to npm or jsr when it absolutely has to.
+every other package manager pings the internet for everything, every time, even if you installed that exact package yesterday on another project. nothing package manager doesn't do that. it favors your local store first and only reaches out to npm or jsr when it absolutely has to.
 
 - **offline first** — works without internet if packages are already in your store
 - **smart deduplication** — never downloads the same package twice across projects
 - **global local store** — one copy of axios serves every project on your machine
 - **parallel downloads** — up to 20 simultaneous downloads with safe sequential db writes
 - **rollback built in** — every update keeps the previous version, one command to go back
-- **clean projects** — your project stays normal, nothing hides its internals away from you
+- **clean projects** — your project stays normal, nothing package manager hides its internals away from you
 - **registry flexible** — supports npm and jsr, you choose per install
 - **lockfile that is a database** — `agree.db` records the exact tree, `nth lock json` exports it
 - **npm crate compatibility** — `optionalDependencies`, `peerDependencies` and `os`/`cpu`/`libc` guards are honoured
@@ -75,7 +75,7 @@ nth add axios, express, baileys, jsr @hono/hono, jsr @some/lib
 
 ## how it works
 
-nothing maintains a global store at `/local/` on your machine:
+nothing package manager maintains a global store at `/local/` on your machine:
 
 ```
 /local/
@@ -104,15 +104,15 @@ nothing maintains a global store at `/local/` on your machine:
 
 every package is its own independent zip. scoped packages like `@next/server` live in a folder named after their scope. nothing is ever bundled together.
 
-this means when nextjs and your other project both need react, there is only ever ONE `react.zip` in the store. nothing fetches react once and every project on your machine uses that same zip forever. deleting nextjs never touches react. updating react never touches nextjs. everything is cleanly isolated.
+this means when nextjs and your other project both need react, there is only ever ONE `react.zip` in the store. nothing package manager fetches react once and every project on your machine uses that same zip forever. deleting nextjs never touches react. updating react never touches nextjs. everything is cleanly isolated.
 
-the zips contain pure upstream package code exactly as the registry serves it. nothing metadata lives only in `nothingda.db`, never inside the zips themselves.
+the zips contain pure upstream package code exactly as the registry serves it. nothing package manager metadata lives only in `nothingda.db`, never inside the zips themselves.
 
-when you install a package nothing checks the store first. if the package is there and the version satisfies your package.json requirement, it copies it straight to your node_modules. no internet. no waiting. done.
+when you install a package nothing package manager checks the store first. if the package is there and the version satisfies your package.json requirement, it copies it straight to your node_modules. no internet. no waiting. done.
 
-only when a package is completely missing from the store does nothing go online to fetch it.
+only when a package is completely missing from the store does nothing package manager go online to fetch it.
 
-**the internet is opt-in, not opt-out.** nothing will never automatically ping npm to check if a newer version exists. not when you are online. not ever. if axios 2.2.4 dropped five minutes ago nothing does not care and does not check. your store has 2.2.3, your project gets 2.2.3, end of story. if you want nothing to look for updates you tell it explicitly:
+**the internet is opt-in, not opt-out.** nothing package manager will never automatically ping npm to check if a newer version exists. not when you are online. not ever. if axios 2.2.4 dropped five minutes ago nothing package manager does not care and does not check. your store has 2.2.3, your project gets 2.2.3, end of story. if you want nothing package manager to look for updates you tell it explicitly:
 
 ```bash
 nth update database      ← update everything in store
@@ -120,7 +120,7 @@ nth check updates        ← just see what is available, download nothing
 nth install axios@2.2.4  ← fetch a specific version you know exists
 ```
 
-any other time nothing keeps its hands off the internet completely.
+any other time nothing package manager keeps its hands off the internet completely.
 
 ---
 
@@ -151,7 +151,7 @@ any other time nothing keeps its hands off the internet completely.
 
 ## offline behavior
 
-when nothing detects no internet connection:
+when nothing package manager detects no internet connection:
 
 ```
 nth i
@@ -169,7 +169,7 @@ scanning local store for required packages...
 
 ## conflict resolution
 
-when two packages need different versions of the same dependency nothing tells you exactly what it costs:
+when two packages need different versions of the same dependency nothing package manager tells you exactly what it costs:
 
 ```
 ⚠ dependency conflict detected
@@ -187,7 +187,7 @@ choose (1/2):
 
 ## the lockfile — `agree.db`
 
-nothing's lockfile is a SQLite database called `agree.db`, written next to your `package.json`. it is not a text file full of indentation: it is the same format the store already uses, so it opens in `sqlite3`, it diffs cleanly as a binary artefact, and nothing has to parse it by hand.
+nothing package manager's lockfile is a SQLite database called `agree.db`, written next to your `package.json`. it is not a text file full of indentation: it is the same format the store already uses, so it opens in `sqlite3`, it diffs cleanly as a binary artefact, and nothing has to parse it by hand.
 
 it holds the whole agreed tree: every root range from package.json, every resolved package, its version, source, tarball URL, integrity hash and checksum, its dependencies, and which optional packages were skipped for this platform.
 
@@ -243,9 +243,9 @@ if a range in package.json changed, the lock is reported as stale and only the m
 
 ## optional, peer and platform dependencies
 
-nothing follows npm's rules for the awkward dependency kinds that break naive installers:
+nothing package manager follows npm's rules for the awkward dependency kinds that break naive installers:
 
-- **`optionalDependencies`** are installed when possible. if the version does not exist, needs another platform, or the network is down, nothing warns and keeps going instead of failing the install.
+- **`optionalDependencies`** are installed when possible. if the version does not exist, needs another platform, or the network is down, nothing package manager warns and keeps going instead of failing the install.
 - **`os` / `cpu` / `libc` guards** are checked against the machine (`linux`/`darwin`/`win32`, `x64`/`arm64`, `glibc`/`musl`). this is what makes `esbuild`, `rollup`, `@swc/core` and `lightningcss` work: twenty `@esbuild/*` optional packages are skipped and the one for this machine is installed.
 - **`peerDependencies`** are installed alongside the package that declares them, like npm 7+. peers marked optional in `peerDependenciesMeta` are left alone.
 - asking for a platform-specific package directly (`nth install fsevents` on linux) is a clear error, not a silent no-op.
@@ -264,7 +264,7 @@ nth install esbuild
 
 ## nth info
 
-run inside any project where you have used nothing to install dependencies:
+run inside any project where you have used nothing package manager to install dependencies:
 
 ```bash
 nth info
@@ -340,7 +340,7 @@ nextjs 14.0.0       ██████████ done ✓
 ⚠ forceall mode: nothing was saved to store
 ```
 
-do not use this in normal development. your local store is what makes nothing fast and smart. `--forceall` throws all of that away on purpose.
+do not use this in normal development. your local store is what makes nothing package manager fast and smart. `--forceall` throws all of that away on purpose.
 
 ---
 

@@ -11,3 +11,6 @@ better-sqlite3-master.zip
 
 # installer scratch
 dist/
+
+# the internal spec is a local design document, not part of the repository
+SPEC.md

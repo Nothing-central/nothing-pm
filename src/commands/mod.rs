@@ -68,7 +68,7 @@ pub fn dispatch(cmd: Command) -> Result<(), String> {
 }
 
 pub const HELP: &str = "\
-nothing — smart offline-first package manager for Node, Bun and Deno
+nothing package manager — smart offline-first installer for Node, Bun and Deno
 
 usage:
   nth install <pkg>, <pkg>     install packages into this project
@@ -89,7 +89,7 @@ usage:
   nth init                     create a starter package.json
 
 the store lives in /local (or $HOME/local, or $NTH_STORE when set).
-nothing only contacts a registry when a package is missing from the store —
+nothing package manager only contacts a registry when a package is missing from the store —
 `nth update database` and `nth check updates` are the only opt-in checks.";
 
 /// Plan the full dependency tree and download whatever is missing.

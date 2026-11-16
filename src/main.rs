@@ -1,4 +1,4 @@
-//! nothing — smart offline-first package manager for Node, Bun and Deno.
+//! nothing package manager — smart offline-first installer for Node, Bun and Deno.
 //!
 //! The binary is `nth`. Only two things here are not hand written: TLS/HTTP
 //! (ureq) and SQLite (rusqlite). JSON, semver, gzip/inflate, tar, zip,

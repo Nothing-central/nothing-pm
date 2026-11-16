@@ -6,7 +6,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5) {
 }
 <#
 .SYNOPSIS
-    Installs the nth (nothing) package manager on Windows.
+    Installs the nothing package manager (nth) on Windows.
 
 .DESCRIPTION
     Native PowerShell installer — no Git Bash required.
