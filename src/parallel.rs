@@ -170,6 +170,8 @@ pub fn run(
                                 size_kb: downloaded.size_kb,
                                 beta: job.beta,
                                 checksum: Some(downloaded.checksum.clone()),
+                                tarball: Some(job.tarball.clone()).filter(|t| !t.is_empty()),
+                                integrity: job.integrity.clone(),
                                 deps: job.deps.clone(),
                             };
                             let _ = tx.send((downloaded.clone(), record));

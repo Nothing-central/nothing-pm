@@ -20,6 +20,8 @@ CREATE TABLE IF NOT EXISTS packages (
   size_kb      INTEGER,
   beta         INTEGER NOT NULL DEFAULT 0,
   checksum     TEXT,
+  tarball      TEXT,
+  integrity    TEXT,
   deps         TEXT NOT NULL DEFAULT '[]',
   installed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -34,6 +36,9 @@ pub struct StoredDep {
     pub version: Option<String>,
     pub source: Source,
     pub checksum: Option<String>,
+    /// Optional dependencies may legitimately be missing (another platform,
+    /// no network); the resolver must not fail over them.
+    pub optional: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -45,6 +50,9 @@ pub struct StoredPackage {
     pub size_kb: u64,
     pub beta: bool,
     pub checksum: Option<String>,
+    /// Where this version came from, so a lockfile can carry download URLs.
+    pub tarball: Option<String>,
+    pub integrity: Option<String>,
     pub deps: Vec<StoredDep>,
 }
 
@@ -63,6 +71,14 @@ impl Db {
             .map_err(|e| format!("cannot configure database: {e}"))?;
         conn.execute_batch(SCHEMA)
             .map_err(|e| format!("cannot create schema: {e}"))?;
+        // Stores created before 0.2.0 have no download URLs: add the columns
+        // in place ("duplicate column" is the expected error on new stores).
+        for column in ["tarball", "integrity"] {
+            let _ = conn.execute(
+                &format!("ALTER TABLE packages ADD COLUMN {column} TEXT"),
+                [],
+            );
+        }
         Ok(Db { conn })
     }
 
@@ -70,7 +86,7 @@ impl Db {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT name, version, prev_version, source, size_kb, beta, checksum, deps
+                "SELECT name, version, prev_version, source, size_kb, beta, checksum, deps, tarball, integrity
                  FROM packages WHERE name = ?1",
             )
             .map_err(|e| e.to_string())?;
@@ -85,7 +101,7 @@ impl Db {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT name, version, prev_version, source, size_kb, beta, checksum, deps
+                "SELECT name, version, prev_version, source, size_kb, beta, checksum, deps, tarball, integrity
                  FROM packages ORDER BY name COLLATE NOCASE",
             )
             .map_err(|e| e.to_string())?;
@@ -116,8 +132,8 @@ impl Db {
 
         self.conn
             .execute(
-                "INSERT INTO packages (name, version, prev_version, source, size_kb, beta, checksum, deps)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                "INSERT INTO packages (name, version, prev_version, source, size_kb, beta, checksum, deps, tarball, integrity)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                  ON CONFLICT(name) DO UPDATE SET
                    version = excluded.version,
                    prev_version = excluded.prev_version,
@@ -126,6 +142,8 @@ impl Db {
                    beta = excluded.beta,
                    checksum = excluded.checksum,
                    deps = excluded.deps,
+                   tarball = excluded.tarball,
+                   integrity = excluded.integrity,
                    updated_at = CURRENT_TIMESTAMP",
                 params![
                     pkg.name,
@@ -135,7 +153,9 @@ impl Db {
                     pkg.size_kb as i64,
                     pkg.beta as i64,
                     pkg.checksum,
-                    deps_json
+                    deps_json,
+                    pkg.tarball,
+                    pkg.integrity
                 ],
             )
             .map_err(|e| format!("db write failed for {}: {e}", pkg.name))?;
@@ -213,11 +233,13 @@ fn row_to_package(row: &rusqlite::Row<'_>) -> Result<StoredPackage, String> {
         size_kb: row.get::<_, Option<i64>>(4).unwrap_or(None).unwrap_or(0).max(0) as u64,
         beta: row.get::<_, Option<i64>>(5).unwrap_or(None).unwrap_or(0) != 0,
         checksum: row.get(6).map_err(|e| e.to_string())?,
+        tarball: row.get(8).map_err(|e| e.to_string())?,
+        integrity: row.get(9).map_err(|e| e.to_string())?,
         deps: deps_from_json(&deps_text),
     })
 }
 
-fn deps_to_json(deps: &[StoredDep]) -> String {
+pub(crate) fn deps_to_json(deps: &[StoredDep]) -> String {
     let items: Vec<Json> = deps
         .iter()
         .map(|d| {
@@ -239,13 +261,14 @@ fn deps_to_json(deps: &[StoredDep]) -> String {
                         None => Json::Null,
                     },
                 ),
+                ("optional", Json::Bool(d.optional)),
             ])
         })
         .collect();
     Json::Arr(items).to_string()
 }
 
-fn deps_from_json(text: &str) -> Vec<StoredDep> {
+pub(crate) fn deps_from_json(text: &str) -> Vec<StoredDep> {
     let parsed = match Json::parse(text) {
         Ok(j) => j,
         Err(_) => return Vec::new(),
@@ -266,6 +289,7 @@ fn deps_from_json(text: &str) -> Vec<StoredDep> {
                     .and_then(Source::parse)
                     .unwrap_or(Source::Npm),
                 checksum: item.str_at("checksum").map(|s| s.to_string()),
+                optional: matches!(item.get("optional"), Some(Json::Bool(true))),
             })
         })
         .collect()
@@ -295,12 +319,15 @@ mod tests {
             size_kb: 12,
             beta: false,
             checksum: Some("sha256:aa".into()),
+            tarball: Some("https://registry/axios.tgz".into()),
+            integrity: Some("sha512-aa".into()),
             deps: vec![StoredDep {
                 name: "follow-redirects".into(),
                 range: "^1.15.0".into(),
                 version: Some("1.15.6".into()),
                 source: Source::Npm,
                 checksum: None,
+                optional: false,
             }],
         };
         db.upsert(&pkg("2.2.3")).unwrap();
@@ -310,8 +337,11 @@ mod tests {
         let stored = db.get("axios").unwrap().unwrap();
         assert_eq!(stored.version, "2.2.4");
         assert_eq!(stored.prev_version.as_deref(), Some("2.2.3"));
+        assert_eq!(stored.tarball.as_deref(), Some("https://registry/axios.tgz"));
+        assert_eq!(stored.integrity.as_deref(), Some("sha512-aa"));
         assert_eq!(stored.deps.len(), 1);
         assert_eq!(stored.deps[0].name, "follow-redirects");
+        assert!(!stored.deps[0].optional);
 
         assert_eq!(db.promote_prev("axios").unwrap().as_deref(), Some("2.2.3"));
         assert_eq!(db.get("axios").unwrap().unwrap().version, "2.2.3");

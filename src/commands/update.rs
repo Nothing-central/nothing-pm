@@ -116,7 +116,24 @@ fn run(apply: bool) -> Result<(), String> {
                     version: None,
                     source: d.source,
                     checksum: None,
+                    optional: false,
                 })
+                .chain(meta.optional.iter().map(|d| StoredDep {
+                    name: d.name.clone(),
+                    range: d.range.clone(),
+                    version: None,
+                    source: d.source,
+                    checksum: None,
+                    optional: true,
+                }))
+                .chain(meta.peer.iter().map(|d| StoredDep {
+                    name: d.name.clone(),
+                    range: d.range.clone(),
+                    version: None,
+                    source: d.source,
+                    checksum: None,
+                    optional: false,
+                }))
                 .collect(),
         });
     }

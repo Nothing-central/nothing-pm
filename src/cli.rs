@@ -55,6 +55,7 @@ pub enum Command {
     Delete { name: String },
     Clear { name: String, part: ClearPart },
     Info,
+    Lock { json: bool },
     Init,
     Help,
     Version,
@@ -136,6 +137,13 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             })
         }
         "info" => Ok(Command::Info),
+        "lock" | "lockfile" => match rest.first().map(|s| s.as_str()) {
+            None => Ok(Command::Lock { json: false }),
+            Some("json") => Ok(Command::Lock { json: true }),
+            Some(other) => Err(format!(
+                "unknown lock target '{other}' — try `nth lock` or `nth lock json`"
+            )),
+        },
         "init" => Ok(Command::Init),
         "help" | "--help" | "-h" => Ok(Command::Help),
         "version" | "--version" | "-V" => Ok(Command::Version),
@@ -400,6 +408,16 @@ mod tests {
                 part: ClearPart::All
             }
         );
+    }
+
+    #[test]
+    fn parses_lock_modes() {
+        assert_eq!(parse(&args("lock")).unwrap(), Command::Lock { json: false });
+        assert_eq!(
+            parse(&args("lock json")).unwrap(),
+            Command::Lock { json: true }
+        );
+        assert!(parse(&args("lock yaml")).is_err());
     }
 
     #[test]

@@ -1,8 +1,9 @@
 //! `nth install`, `nth i` and `nth add`.
 
-use super::{context, ensure_packages, install_plan, Context};
-use crate::cli::{PackageSpec, Source};
+use super::{context, ensure_packages, fetch_plan, install_plan, lock, stored_source, Context};
+use crate::cli::PackageSpec;
 use crate::install as installer;
+use crate::lockfile::Lockfile;
 use crate::project::{self, Manifest};
 use crate::resolver::{Plan, Root};
 use crate::ui;
@@ -27,6 +28,7 @@ pub fn run_install(specs: Vec<PackageSpec>) -> Result<(), String> {
     ui::info("arranging folders...");
     let count = install_plan(&ctx, &plan, &node_modules, &downloaded, false)?;
     record_dependencies(&project, &plan, &specs)?;
+    refresh_lock(&ctx, &project);
 
     ui::blank();
     ui::ok(&format!("{count} packages installed"));
@@ -58,7 +60,17 @@ pub fn run_install_all(forceall: bool) -> Result<(), String> {
         })
         .collect();
 
-    let (plan, downloaded) = ensure_packages(&ctx, &roots, forceall)?;
+    // A lockfile that still matches package.json wins: it is the exact tree
+    // this project agreed on, so nothing has to guess or ask a registry.
+    let (plan, downloaded) = match locked_plan(&ctx, &project, &roots)? {
+        Some(plan) => {
+            ui::info("agree.db matches package.json — installing the locked versions");
+            let downloaded = fetch_plan(&ctx, &plan, false)?;
+            (plan, downloaded)
+        }
+        None => ensure_packages(&ctx, &roots, forceall)?,
+    };
+
     let node_modules = installer::node_modules(&project);
 
     ui::blank();
@@ -69,6 +81,8 @@ pub fn run_install_all(forceall: bool) -> Result<(), String> {
     ui::ok(&format!("{count} packages installed"));
     if forceall {
         ui::warn("forceall mode: nothing was saved to store");
+    } else if let Err(e) = lock::record(&project, &roots, &plan) {
+        ui::warn(&format!("could not update agree.db: {e}"));
     }
     Ok(())
 }
@@ -102,13 +116,23 @@ pub fn run_add(specs: Vec<PackageSpec>) -> Result<(), String> {
     Ok(())
 }
 
-fn stored_source(ctx: &Context, name: &str) -> Source {
-    ctx.db
-        .get(name)
-        .ok()
-        .flatten()
-        .map(|p| p.source)
-        .unwrap_or(Source::Npm)
+/// The lockfile only applies when its roots are the project's current ones.
+fn locked_plan(ctx: &Context, project: &Path, roots: &[Root]) -> Result<Option<Plan>, String> {
+    if !Lockfile::exists(project) {
+        return Ok(None);
+    }
+    let lockfile = Lockfile::open(project)?;
+    if !lockfile.matches(roots)? {
+        ui::info("agree.db is stale (package.json changed) — resolving again");
+        return Ok(None);
+    }
+    lockfile.to_plan(&ctx.db)
+}
+
+fn refresh_lock(ctx: &Context, project: &Path) {
+    if let Err(e) = lock::refresh(ctx, project) {
+        ui::warn(&format!("could not update agree.db: {e}"));
+    }
 }
 
 /// `nth install axios` writes the dependency back into package.json, the

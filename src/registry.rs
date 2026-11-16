@@ -22,6 +22,161 @@ pub struct VersionMeta {
     pub tarball: String,
     pub integrity: Option<String>,
     pub deps: Vec<DepRef>,
+    /// Install if you can, keep going if you cannot (npm semantics).
+    pub optional: Vec<DepRef>,
+    /// npm 7+ installs peers alongside the package that asks for them.
+    pub peer: Vec<DepRef>,
+    /// Platform guards: `os`, `cpu` and `libc` from the version's metadata.
+    pub os: Vec<String>,
+    pub cpu: Vec<String>,
+    pub libc: Vec<String>,
+}
+
+/// The platform this binary is running on, in npm's vocabulary
+/// (`linux`/`darwin`/`win32`, `x64`/`arm64`, `glibc`/`musl`).
+#[derive(Clone, Debug)]
+pub struct Platform {
+    pub os: String,
+    pub cpu: String,
+    pub libc: Option<String>,
+}
+
+impl Platform {
+    pub fn current() -> Platform {
+        let os = match std::env::consts::OS {
+            "macos" => "darwin".to_string(),
+            other => other.to_string(),
+        };
+        let cpu = match std::env::consts::ARCH {
+            "x86" => "ia32".to_string(),
+            "x86_64" => "x64".to_string(),
+            "aarch64" => "arm64".to_string(),
+            "powerpc64" => "ppc64".to_string(),
+            other => other.to_string(),
+        };
+        let libc = if os == "linux" {
+            detect_linux_libc().map(|s| s.to_string())
+        } else {
+            None
+        };
+        Platform { os, cpu, libc }
+    }
+
+    pub fn label(&self) -> String {
+        match &self.libc {
+            Some(libc) => format!("{}/{} ({})", self.os, self.cpu, libc),
+            None => format!("{}/{}", self.os, self.cpu),
+        }
+    }
+}
+
+/// A package binary built against musl will not load on glibc, so this one
+/// has to be right. Every mainstream Linux image has one of these loaders.
+fn detect_linux_libc() -> Option<&'static str> {
+    for dir in ["/lib", "/usr/lib", "/lib64"] {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with("ld-musl-") {
+                return Some("musl");
+            }
+        }
+    }
+    Some("glibc")
+}
+
+/// True when this version can run here. An empty guard means "no opinion";
+/// `!value` entries exclude exactly that value.
+pub fn supports(meta: &VersionMeta, platform: &Platform) -> bool {
+    field_allows(&meta.os, &platform.os)
+        && field_allows(&meta.cpu, &platform.cpu)
+        && match &platform.libc {
+            Some(libc) => field_allows(&meta.libc, libc),
+            None => true,
+        }
+}
+
+fn field_allows(values: &[String], current: &str) -> bool {
+    if values.is_empty() {
+        return true;
+    }
+    let mut has_allow_entry = false;
+    let mut allowed = false;
+    for value in values {
+        if let Some(negated) = value.strip_prefix('!') {
+            if negated == current {
+                return false;
+            }
+        } else {
+            has_allow_entry = true;
+            if value == current {
+                allowed = true;
+            }
+        }
+    }
+    // A list of only exclusions (["!win32"]) allows everything else.
+    if has_allow_entry {
+        allowed
+    } else {
+        true
+    }
+}
+
+fn string_list(value: Option<&crate::json::Json>) -> Vec<String> {
+    let items = match value.and_then(|v| v.as_arr()) {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+    items
+        .iter()
+        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+        .collect()
+}
+
+/// One `{name: range}` map from a version's metadata.
+fn dep_refs(meta: &crate::json::Json, key: &str) -> Vec<DepRef> {
+    let entries = match meta.get(key).and_then(|d| d.as_obj()) {
+        Some(o) => o,
+        None => return Vec::new(),
+    };
+    entries
+        .iter()
+        .map(|(dep_name, dep_range)| {
+            let dep_range = dep_range.as_str().unwrap_or("*");
+            let (name, source) = match dep_name.strip_prefix("@jsr/") {
+                Some(_) => (jsr_real_name(dep_name), Source::Jsr),
+                None => (dep_name.clone(), Source::Npm),
+            };
+            DepRef {
+                name,
+                range: dep_range.to_string(),
+                source,
+            }
+        })
+        .collect()
+}
+
+/// `peerDependencies` minus everything marked optional in
+/// `peerDependenciesMeta` — those are the peer shell a package can live
+/// without.
+fn peer_refs(meta: &crate::json::Json) -> Vec<DepRef> {
+    let optional_meta = meta.get("peerDependenciesMeta").and_then(|m| m.as_obj());
+    dep_refs(meta, "peerDependencies")
+        .into_iter()
+        .filter(|dep| {
+            let marked_optional = optional_meta
+                .map(|entries| {
+                    entries.iter().any(|(name, value)| {
+                        name == &dep.name
+                            && matches!(value.get("optional"), Some(crate::json::Json::Bool(true)))
+                    })
+                })
+                .unwrap_or(false);
+            !marked_optional
+        })
+        .collect()
 }
 
 impl VersionMeta {
@@ -179,26 +334,20 @@ pub fn fetch_packument(
             Some(t) => t.to_string(),
             None => continue,
         };
-        let mut deps = Vec::new();
-        if let Some(deps_obj) = meta.get("dependencies").and_then(|d| d.as_obj()) {
-            for (dep_name, dep_range) in deps_obj {
-                let dep_range = dep_range.as_str().unwrap_or("*");
-                let (name, source) = match dep_name.strip_prefix("@jsr/") {
-                    Some(_) => (jsr_real_name(dep_name), Source::Jsr),
-                    None => (dep_name.clone(), Source::Npm),
-                };
-                deps.push(DepRef {
-                    name,
-                    range: dep_range.to_string(),
-                    source,
-                });
-            }
-        }
+        let optional = dep_refs(meta, "optionalDependencies");
+        // npm treats an entry listed in both maps as optional.
+        let mut deps = dep_refs(meta, "dependencies");
+        deps.retain(|d| !optional.iter().any(|o| o.name == d.name));
         versions.push(VersionMeta {
             version,
             tarball,
             integrity: meta.str_path(&["dist", "integrity"]).map(|s| s.to_string()),
             deps,
+            optional,
+            peer: peer_refs(meta),
+            os: string_list(meta.get("os")),
+            cpu: string_list(meta.get("cpu")),
+            libc: string_list(meta.get("libc")),
         });
     }
 
@@ -310,7 +459,80 @@ mod tests {
             tarball: tarball.into(),
             integrity: None,
             deps: Vec::new(),
+            optional: Vec::new(),
+            peer: Vec::new(),
+            os: Vec::new(),
+            cpu: Vec::new(),
+            libc: Vec::new(),
         }
+    }
+
+    #[test]
+    fn platform_guards_follow_npm_rules() {
+        let mut m = meta("1.0.0", "t");
+        let linux_x64 = Platform {
+            os: "linux".into(),
+            cpu: "x64".into(),
+            libc: Some("glibc".into()),
+        };
+        assert!(supports(&m, &linux_x64));
+
+        m.os = vec!["darwin".into()];
+        assert!(!supports(&m, &linux_x64));
+
+        m.os = vec!["linux".into()];
+        m.cpu = vec!["arm64".into()];
+        assert!(!supports(&m, &linux_x64));
+
+        m.cpu = vec!["!arm64".into()];
+        assert!(supports(&m, &linux_x64));
+
+        m.cpu = vec![ "!x64".into()];
+        assert!(!supports(&m, &linux_x64));
+
+        m.cpu = vec![];
+        m.libc = vec!["musl".into()];
+        assert!(!supports(&m, &linux_x64));
+    }
+
+    #[test]
+    fn parses_optional_peer_and_platform_fields() {
+        let json = crate::json::Json::parse(
+            r#"{"versions":{"1.0.0":{
+                "dist":{"tarball":"https://x/e.tgz","integrity":"sha512-aa"},
+                "dependencies":{"core":"^1.0.0","@jsr/std__path":"1.0.0"},
+                "optionalDependencies":{"@esbuild/linux-x64":"0.25.0","core":"^2"},
+                "peerDependencies":{"react":">=18","sharp":"*"},
+                "peerDependenciesMeta":{"sharp":{"optional":true}},
+                "os":["linux"],"cpu":["x64"],"libc":["glibc"]
+            }}}"#,
+        )
+        .unwrap();
+        let versions = json.get("versions").and_then(|v| v.as_obj()).unwrap();
+        let meta_json = &versions[0].1;
+
+        let optional = dep_refs(meta_json, "optionalDependencies");
+        assert_eq!(optional.len(), 2);
+        assert_eq!(optional[0].name, "@esbuild/linux-x64");
+
+        let peers = peer_refs(meta_json);
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].name, "react");
+
+        assert_eq!(string_list(meta_json.get("os")), vec!["linux".to_string()]);
+        assert_eq!(string_list(meta_json.get("libc")), vec!["glibc".to_string()]);
+    }
+
+    #[test]
+    fn reads_jsr_dependencies_from_the_compat_endpoint() {
+        let json = crate::json::Json::parse(
+            r#"{"versions":{"1.0.0":{"dist":{"tarball":"t"},"dependencies":{"@jsr/std__internal":"1.0.0"}}}}"#,
+        )
+        .unwrap();
+        let versions = json.get("versions").and_then(|v| v.as_obj()).unwrap();
+        let deps = dep_refs(&versions[0].1, "dependencies");
+        assert_eq!(deps[0].name, "@std/internal");
+        assert_eq!(deps[0].source, Source::Jsr);
     }
 
     fn packument() -> Packument {

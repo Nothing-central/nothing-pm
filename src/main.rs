@@ -14,6 +14,7 @@ mod http;
 mod inflate;
 mod install;
 mod json;
+mod lockfile;
 mod parallel;
 mod project;
 mod registry;

@@ -17,7 +17,8 @@ every other package manager pings the internet for everything, every time, even 
 - **rollback built in** — every update keeps the previous version, one command to go back
 - **clean projects** — your project stays normal, nothing hides its internals away from you
 - **registry flexible** — supports npm and jsr, you choose per install
-- **no lock file** — package.json is the source of truth, the db handles the rest, your git history stays clean
+- **lockfile that is a database** — `agree.db` records the exact tree, `nth lock json` exports it
+- **npm crate compatibility** — `optionalDependencies`, `peerDependencies` and `os`/`cpu`/`libc` guards are honoured
 
 ---
 
@@ -143,6 +144,8 @@ any other time nothing keeps its hands off the internet completely.
 | `nth clear <pkg> new` | roll back to previous version |
 | `nth clear <pkg>` | remove all versions of a package |
 | `nth info` | generate nothing-info.json for current project |
+| `nth lock` | show agree.db, the project lockfile |
+| `nth lock json` | write agree.json, the same lockfile as json |
 
 ---
 
@@ -182,32 +185,79 @@ choose (1/2):
 
 ---
 
-## no lock file
+## the lockfile — `agree.db`
 
-nothing has no lock file. not `nothing.lock`, not `package-lock.json`, not anything.
+nothing's lockfile is a SQLite database called `agree.db`, written next to your `package.json`. it is not a text file full of indentation: it is the same format the store already uses, so it opens in `sqlite3`, it diffs cleanly as a binary artefact, and nothing has to parse it by hand.
 
-a lock file stores exact versions, checksums and dependency trees. nothing already stores all of that in `/local/nothingdatabase/nothingda.db`. a lock file would just be a copy of data that already exists — completely redundant.
+it holds the whole agreed tree: every root range from package.json, every resolved package, its version, source, tarball URL, integrity hash and checksum, its dependencies, and which optional packages were skipped for this platform.
 
-**package.json is the source of truth.** the versions you specify there are exactly what nothing fetches. on a fresh machine with an empty store:
+```bash
+nth install axios     # writes package.json and agree.db
+nth i                 # replays agree.db when it still matches package.json
+nth lock              # show what is locked
+nth lock json         # write agree.json, the same lockfile as json
+```
+
+on the next `nth i` the lockfile is consulted first. if the ranges in package.json are still the ones that produced the lock, the exact locked tree is installed — no resolution, no prompts, no registry call when the packages are in the store:
 
 ```
 nth i
 
-scanning package.json...
-✗ axios 2.2.3     not in store, fetching from npm...
-✗ elysia 1.1.2    not in store, fetching from npm...
-✗ hono 4.0.0      not in store, fetching from npm...
-done ✓
+agree.db matches package.json — installing the locked versions
+
+✓ axios 2.2.3     in store
+✓ follow-redirects 1.15.6 in store
+
+2 packages installed
 ```
 
-no lock file needed. nothing reads the versions straight from package.json and fetches exactly those. over time as the machine's store fills up `nth i` gets faster and faster because more packages are already cached locally.
+if a range in package.json changed, the lock is reported as stale and only the moved parts are resolved again before the lock is rewritten. deleting `agree.db` is always safe: `nth i` will build a new one.
 
-the side effect is your git history stays clean forever:
+`agree.json` looks like this (`nth lock json`):
+
+```json
+{
+  "lockfileVersion": 1,
+  "generatedBy": "nth 0.2.0",
+  "roots": { "esbuild": "^0.28.2" },
+  "packages": {
+    "esbuild": {
+      "version": "0.28.2",
+      "source": "npm",
+      "tarball": "https://registry.npmjs.org/esbuild/-/esbuild-0.28.2.tgz",
+      "integrity": "sha512-HKVLS8dvI...",
+      "checksum": "sha256:5abb3b49...",
+      "optional": false,
+      "nestedUnder": null,
+      "dependencies": {
+        "@esbuild/linux-x64": { "range": "0.28.2", "version": "0.28.2", "optional": true }
+      }
+    }
+  }
+}
+```
+
+`--forceall` never writes `agree.db` (or the store), so CI stays untouched.
+
+---
+
+## optional, peer and platform dependencies
+
+nothing follows npm's rules for the awkward dependency kinds that break naive installers:
+
+- **`optionalDependencies`** are installed when possible. if the version does not exist, needs another platform, or the network is down, nothing warns and keeps going instead of failing the install.
+- **`os` / `cpu` / `libc` guards** are checked against the machine (`linux`/`darwin`/`win32`, `x64`/`arm64`, `glibc`/`musl`). this is what makes `esbuild`, `rollup`, `@swc/core` and `lightningcss` work: twenty `@esbuild/*` optional packages are skipped and the one for this machine is installed.
+- **`peerDependencies`** are installed alongside the package that declares them, like npm 7+. peers marked optional in `peerDependenciesMeta` are left alone.
+- asking for a platform-specific package directly (`nth install fsevents` on linux) is a clear error, not a silent no-op.
 
 ```bash
-git status
-  modified: index.ts       ← actual work
-  # that's it. no 3000 line package-lock.json diff. no yarn.lock noise.
+nth install esbuild
+
+⚠ 25 optional package(s) skipped: built for a different platform (linux/x64 (glibc))
+✗ esbuild 0.28.2            not in store, fetching...
+✗ @esbuild/linux-x64 0.28.2 not in store, fetching...
+
+✓ 2 packages installed
 ```
 
 ---

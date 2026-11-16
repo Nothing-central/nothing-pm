@@ -7,11 +7,12 @@
 pub mod info;
 pub mod init;
 pub mod install;
+pub mod lock;
 pub mod store_ops;
 pub mod uninstall;
 pub mod update;
 
-use crate::cli::Command;
+use crate::cli::{Command, Source};
 use crate::config::Store;
 use crate::db::Db;
 use crate::http::Client;
@@ -53,6 +54,7 @@ pub fn dispatch(cmd: Command) -> Result<(), String> {
         Command::Delete { name } => store_ops::run_delete(&name),
         Command::Clear { name, part } => store_ops::run_clear(&name, part),
         Command::Info => info::run(),
+        Command::Lock { json } => lock::run(json),
         Command::Init => init::run(),
         Command::Help => {
             println!("{HELP}");
@@ -82,6 +84,8 @@ usage:
   nth clear <pkg> new          roll back to the previous version
   nth clear <pkg>              remove every version of a package
   nth info                     write nothing-info.json for this project
+  nth lock                     show agree.db, the project lockfile
+  nth lock json               write agree.json, the same lockfile as json
   nth init                     create a starter package.json
 
 the store lives in /local (or $HOME/local, or $NTH_STORE when set).
@@ -199,6 +203,9 @@ pub fn ensure_packages(
         }
     };
 
+    for warning in &plan.warnings {
+        ui::warn(warning);
+    }
     for item in plan.primary() {
         if item.in_store {
             ui::status(ui::CHECK, &item.label(), "in store");
@@ -213,6 +220,17 @@ pub fn ensure_packages(
         ));
     }
 
+    let downloaded = fetch_plan(ctx, &plan, forceall)?;
+    Ok((plan, downloaded))
+}
+
+/// Download everything in `plan` that is not already in the store.
+pub fn fetch_plan(
+    ctx: &Context,
+    plan: &Plan,
+    forceall: bool,
+) -> Result<Vec<Downloaded>, String> {
+    let client = Client::new();
     let jobs: Vec<Job> = plan
         .to_fetch()
         .iter()
@@ -258,7 +276,17 @@ pub fn ensure_packages(
         downloaded = outcome.done;
     }
 
-    Ok((plan, downloaded))
+    Ok(downloaded)
+}
+
+/// The registry a stored package came from, so a replan does not need to ask.
+pub fn stored_source(ctx: &Context, name: &str) -> Source {
+    ctx.db
+        .get(name)
+        .ok()
+        .flatten()
+        .map(|p| p.source)
+        .unwrap_or(Source::Npm)
 }
 
 /// Copy every planned package into `node_modules`.

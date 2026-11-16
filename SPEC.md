@@ -46,7 +46,8 @@ nothing maintains one global store for the entire machine. no per-project hidden
 - scoped packages like `@next/server` live in a subfolder named after their scope e.g. `libraries/@next/server.zip`
 - every package is its own independent zip, nothing is ever bundled together
 - zips contain pure upstream package code exactly as the registry serves it — nothing metadata never goes inside a zip, it lives only in the db
-- no lock file is generated or maintained. package.json is the source of truth for versions. the db handles everything else
+- each project keeps `agree.db`, a SQLite lockfile next to its package.json (section 5)
+- package.json is the source of truth for ranges; `agree.db` records exactly what was resolved from them
 
 ---
 
@@ -216,7 +217,15 @@ if no prev exists, asks user to confirm full deletion.
 
 removes everything. current zip, prev zip, db entry. nuclear option.
 
-### 3.11 `nth info`
+### 3.11 `nth lock` / `nth lock json`
+
+`nth lock` prints the project lockfile: every locked package, its version, source, whether it was optional, and which package it is nested under.
+
+`nth lock json` writes `agree.json` next to `agree.db` — the same lockfile as JSON, for scripts, CI checks and readable diffs.
+
+both are read-only with respect to the lockfile; only `nth i` and `nth install` rewrite `agree.db`.
+
+### 3.12 `nth info`
 
 must be run inside a project where nothing has been used to install dependencies.
 
@@ -282,15 +291,32 @@ scanning local store for required packages...
 
 ---
 
-## 5. no lock file
+## 5. the lockfile — `agree.db`
 
-nothing generates no lock file of any kind. there is no `nothing.lock`, no `package-lock.json`, no `yarn.lock`.
+every project gets a lockfile called `agree.db`, written in the project root next to `package.json`.
 
-a lock file stores exact versions, checksums and dependency trees. nothing already stores all of that in `nothingda.db`. a lock file would be a redundant copy of data that already exists.
+it is a SQLite database, not a text file. the same format as `nothingda.db`, so it opens in any sqlite client, stays compact for thousands of packages and needs no hand-written parser.
 
-**package.json is the sole source of truth for versions.** when a project is cloned onto a fresh machine with an empty store, nothing reads the versions from package.json directly and fetches exactly those versions. the db fills up naturally over time and subsequent installs get faster as more packages are already cached.
+### contents
 
-this keeps project repositories clean — no lock file diffs in pull requests, no merge conflicts on lock files, no 3000 line changes nobody understands.
+```sql
+meta      (key, value)                       -- lockfileVersion, generatedBy
+roots     (name, range, source)              -- the package.json ranges that produced the lock
+packages  (name, version, source, tarball, integrity, checksum,
+           beta, optional, nested_under, deps)
+```
+
+`packages` records the complete resolved tree: transitive dependencies, optional packages kept for this platform, second copies of conflicted dependencies (`nested_under`), the tarball URL and npm integrity hash needed to refetch, and a `sha256:` checksum of what actually landed in the store.
+
+### rules
+
+- `nth i` reads `agree.db` first. if `roots` still matches the ranges in package.json, the exact locked tree is installed — no resolution, no prompts, no registry call for anything already in the store
+- if any range changed, the lock is stale: nothing resolves again (store first) and rewrites the lock before installing
+- deleting `agree.db` is always safe — the next install rebuilds it
+- `nth lock` prints the lock; `nth lock json` writes `agree.json`, the same data as JSON, for scripts and diff review
+- `nth i --forceall` never writes `agree.db`, matching its promise to leave no trace
+
+the lock is a record of agreement, not a second source of truth: package.json still decides the ranges, and the store db still decides what this machine holds.
 
 ---
 
