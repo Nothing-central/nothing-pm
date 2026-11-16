@@ -24,7 +24,11 @@ every other package manager pings the internet for everything, every time, even 
 ## installation
 
 ```bash
+# linux
 curl -fsSL https://raw.githubusercontent.com/Nothing-central/nothing-pm/main/install.sh | bash
+
+# windows (powershell)
+# irm https://raw.githubusercontent.com/Nothing-central/nothing-pm/main/install.ps1 | iex
 ```
 
 prebuilt binaries ship for linux and windows (x86_64). the script detects the
@@ -128,6 +132,7 @@ any other time nothing keeps its hands off the internet completely.
 | `nth install axios, jsr @hono/hono` | mix npm and jsr in one command |
 | `nth i` | install all deps from package.json |
 | `nth i --forceall` | CI mode — no prompts, strict versions, no db writes |
+| `nth uninstall <pkg>` | remove a package from this project (stays in the store) |
 | `nth add <pkg>, <pkg>` | download packages to store without installing |
 | `nth add axios, jsr @hono/hono` | stock up from mixed registries in one command |
 | `nth update database` | check all stored packages for updates |

@@ -36,6 +36,45 @@ impl Manifest {
         })
     }
 
+    /// Drop a dependency from dependencies and devDependencies.
+    /// Returns true when something was actually removed.
+    pub fn remove_dependency(&mut self, name: &str) -> Result<bool, String> {
+        let mut fields = match self.raw.as_obj() {
+            Some(f) => f.clone(),
+            None => return Err("package.json is not an object".into()),
+        };
+
+        let mut removed = false;
+        for section in ["dependencies", "devDependencies"] {
+            let slot = match fields.iter().position(|(k, _)| k == section) {
+                Some(i) => i,
+                None => continue,
+            };
+            let entries = match fields[slot].1.as_obj() {
+                Some(e) => e.clone(),
+                None => continue,
+            };
+            let before = entries.len();
+            let kept: Vec<(String, Json)> = entries
+                .into_iter()
+                .filter(|(k, _)| k != name)
+                .collect();
+            if kept.len() != before {
+                removed = true;
+                fields[slot].1 = Json::Obj(kept);
+            }
+        }
+
+        if !removed {
+            return Ok(false);
+        }
+        self.raw = Json::Obj(fields);
+        fs::write(&self.path, self.raw.to_pretty())
+            .map_err(|e| format!("cannot write {}: {e}", self.path.display()))?;
+        self.dependencies.retain(|(k, _)| k != name);
+        Ok(true)
+    }
+
     /// Record a dependency without disturbing anything else in the file.
     pub fn add_dependency(&mut self, name: &str, range: &str) -> Result<(), String> {
         let mut fields = match self.raw.as_obj() {
@@ -74,6 +113,47 @@ impl Manifest {
         fs::write(&self.path, self.raw.to_pretty())
             .map_err(|e| format!("cannot write {}: {e}", self.path.display()))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_project(body: &str) -> (Manifest, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "nth-manifest-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("package.json");
+        std::fs::write(&path, body).unwrap();
+        (Manifest::read(&path).unwrap(), dir)
+    }
+
+    #[test]
+    fn adds_and_removes_dependencies() {
+        let (mut manifest, dir) = temp_project(
+            r#"{"name":"x","version":"1.0.0","devDependencies":{"jest":"^29.0.0"}}"#,
+        );
+
+        manifest.add_dependency("axios", "^2.8.6").unwrap();
+        let reloaded = Manifest::read(&manifest.path).unwrap();
+        assert!(reloaded
+            .dependencies
+            .iter()
+            .any(|(n, r)| n == "axios" && r == "^2.8.6"));
+
+        assert!(manifest.remove_dependency("axios").unwrap());
+        assert!(manifest.remove_dependency("jest").unwrap());
+        assert!(!manifest.remove_dependency("not-there").unwrap());
+
+        let reloaded = Manifest::read(&manifest.path).unwrap();
+        assert!(reloaded.dependencies.is_empty());
+        assert_eq!(reloaded.name.as_deref(), Some("x"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 

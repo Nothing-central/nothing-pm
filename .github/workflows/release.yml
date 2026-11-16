@@ -11,8 +11,15 @@ permissions:
   contents: write
 
 jobs:
+  # The same checks CI runs on every push. Nothing is built or published
+  # unless the test suite passes for this commit.
+  test:
+    name: test
+    uses: ./.github/workflows/ci.yml
+
   build:
     name: build ${{ matrix.asset }}
+    needs: test
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

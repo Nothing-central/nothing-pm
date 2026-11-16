@@ -47,6 +47,7 @@ pub enum ClearPart {
 pub enum Command {
     Install { specs: Vec<PackageSpec>, forceall: bool },
     InstallAll { forceall: bool },
+    Uninstall { names: Vec<String> },
     Add { specs: Vec<PackageSpec> },
     UpdateDatabase,
     CheckUpdates,
@@ -107,7 +108,11 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             Some("db") | Some("database") | None => Ok(Command::ViewDb),
             Some(other) => Err(format!("unknown view target '{other}' — try `nth view db`")),
         },
-        "delete" | "remove" | "rm" => {
+        // npm-style removal from the project; the store copy is kept.
+        "uninstall" | "uni" | "remove" | "rm" => Ok(Command::Uninstall {
+            names: parse_names(&rest)?,
+        }),
+        "delete" => {
             let name = rest.first().ok_or("nth delete needs a package name")?;
             Ok(Command::Delete {
                 name: name.clone(),
@@ -191,6 +196,41 @@ pub fn parse_specs(tokens: &[String]) -> Result<Vec<PackageSpec>, String> {
         return Err("no packages given".into());
     }
     Ok(specs)
+}
+
+/// Flattens `axios, @scope/pkg@1.2.3` into bare package names for uninstall.
+pub fn parse_names(tokens: &[String]) -> Result<Vec<String>, String> {
+    let mut names: Vec<String> = Vec::new();
+    for token in tokens {
+        for part in token.split(',') {
+            let raw = part.trim();
+            if raw.is_empty() {
+                continue;
+            }
+            let name = strip_version(raw);
+            validate_name(&name)?;
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    if names.is_empty() {
+        return Err("nth uninstall needs at least one package name".into());
+    }
+    Ok(names)
+}
+
+fn strip_version(raw: &str) -> String {
+    if let Some(rest) = raw.strip_prefix('@') {
+        return match rest.find('@') {
+            Some(i) => format!("@{}", &rest[..i]),
+            None => raw.to_string(),
+        };
+    }
+    match raw.find('@') {
+        Some(i) => raw[..i].to_string(),
+        None => raw.to_string(),
+    }
 }
 
 fn parse_spec(raw: &str) -> Result<PackageSpec, String> {
@@ -324,6 +364,24 @@ mod tests {
             parse(&args("i --forceall")).unwrap(),
             Command::InstallAll { forceall: true }
         );
+    }
+
+    #[test]
+    fn parses_uninstall() {
+        let cmd = parse(&args("uninstall axios, @scope/pkg@1.2.3 express")).unwrap();
+        match cmd {
+            Command::Uninstall { names } => {
+                assert_eq!(names, vec!["axios", "@scope/pkg", "express"]);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(
+            parse(&args("remove axios")).unwrap(),
+            Command::Uninstall {
+                names: vec!["axios".into()]
+            }
+        );
+        assert!(parse(&args("uninstall")).is_err());
     }
 
     #[test]

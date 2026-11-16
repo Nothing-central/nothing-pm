@@ -8,6 +8,7 @@ pub mod info;
 pub mod init;
 pub mod install;
 pub mod store_ops;
+pub mod uninstall;
 pub mod update;
 
 use crate::cli::Command;
@@ -44,6 +45,7 @@ pub fn dispatch(cmd: Command) -> Result<(), String> {
             }
         }
         Command::InstallAll { forceall } => install::run_install_all(forceall),
+        Command::Uninstall { names } => uninstall::run(names),
         Command::Add { specs } => install::run_add(specs),
         Command::UpdateDatabase => update::run_update(),
         Command::CheckUpdates => update::run_check(),
@@ -70,6 +72,7 @@ usage:
   nth install <pkg>, <pkg>     install packages into this project
   nth install jsr <pkg>        install from the jsr registry
   nth i [--forceall]           install everything in package.json
+  nth uninstall <pkg>          remove packages from this project
   nth add <pkg>, <pkg>         download to the store without installing
   nth update database          check every stored package and update it
   nth check updates            show available updates, download nothing
