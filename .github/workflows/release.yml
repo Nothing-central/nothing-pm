@@ -82,7 +82,8 @@ jobs:
         run: |
           set -eu
           cd artifacts
-          sha256sum ./* > SHA256SUMS
+          # plain names: install.sh matches on the file name
+          sha256sum nth-* > SHA256SUMS
           cat SHA256SUMS
 
       - name: resolve tag

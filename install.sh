@@ -163,7 +163,16 @@ download "$url" "$tmp/$asset"
 
 if [ -z "${NTH_NO_VERIFY:-}" ]; then
     if try_download "$sums_url" "$tmp/SHA256SUMS"; then
-        expected=$(awk -v a="$asset" '$2 == a || $2 == "*" a { print $1; exit }' "$tmp/SHA256SUMS")
+        # sha256sum writes names as given: "nth-...", "./nth-..." or "*nth-..."
+        expected=$(awk -v a="$asset" '
+            {
+                name = $2
+                sub(/^\*/, "", name)
+                sub(/^\.\//, "", name)
+                sub(/^.*\//, "", name)
+                if (name == a) { print $1; exit }
+            }
+        ' "$tmp/SHA256SUMS")
         if [ -n "$expected" ]; then
             actual=""
             if have sha256sum; then
