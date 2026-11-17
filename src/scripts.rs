@@ -163,8 +163,10 @@ pub fn run_lifecycle(project: &Path, installed: &[Installed]) {
 
 fn run_one(project: &Path, pkg: &Installed, event: &str, body: &str) -> Result<(), String> {
     let mut command = if cfg!(windows) {
+        // npm runs scripts as `cmd.exe /d /s /c "<script>"`; the flags
+        // matter, /S keeps cmd from stripping the quotes node needs.
         let mut c = Command::new("cmd");
-        c.arg("/C").arg(body);
+        c.args(["/D", "/S", "/C"]).arg(body);
         c
     } else {
         let mut c = Command::new("sh");
@@ -246,20 +248,26 @@ mod tests {
         let root = temp_dir("bins");
         let nm = root.join("node_modules");
 
-        // package with a bin and a postinstall that uses it
+        // package with a bin and a postinstall that uses it. the script
+        // lives in a file so the test does not depend on shell quoting.
         let pkg_dir = nm.join("widget");
         fs::create_dir_all(pkg_dir.join("bin")).unwrap();
         fs::write(
             pkg_dir.join("package.json"),
             r#"{"name":"widget","version":"1.0.0","bin":{"widget":"bin/cli.js"},
-                "scripts":{"postinstall":"node -e \"require('fs').writeFileSync('ran.txt','')\""}}"#,
+                "scripts":{"postinstall":"node build.js"}}"#,
         )
         .unwrap();
         fs::write(pkg_dir.join("bin/cli.js"), "#!/usr/bin/env node\n").unwrap();
+        fs::write(
+            pkg_dir.join("build.js"),
+            "require('fs').writeFileSync('ran.txt', 'built');\n",
+        )
+        .unwrap();
 
         let installed = vec![Installed {
             name: "widget".into(),
-            dir: pkg_dir,
+            dir: pkg_dir.clone(),
             node_modules: nm.clone(),
         }];
 
@@ -268,7 +276,9 @@ mod tests {
         assert!(link.exists() || nm.join(".bin/widget.cmd").exists());
 
         run_lifecycle(&root, &installed);
-        assert!(nm.join("widget/ran.txt").is_file());
+        let marker = pkg_dir.join("ran.txt");
+        assert!(marker.is_file(), "postinstall did not run in the package dir");
+        assert_eq!(fs::read_to_string(&marker).unwrap(), "built");
         let _ = fs::remove_dir_all(root);
     }
 }
