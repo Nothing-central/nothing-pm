@@ -19,6 +19,7 @@ mod parallel;
 mod project;
 mod registry;
 mod resolver;
+mod scripts;
 mod semver;
 mod store;
 mod tar;

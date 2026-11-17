@@ -29,6 +29,7 @@ pub struct Job {
     pub integrity: Option<String>,
     pub beta: bool,
     pub deps: Vec<StoredDep>,
+    pub peers: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug)]
@@ -166,6 +167,7 @@ pub fn run(
                                 integrity: job.integrity.clone(),
                                 active: true,
                                 deps: job.deps.clone(),
+                                peers: job.peers.clone(),
                             };
                             let _ = tx.send((downloaded.clone(), record));
                             done.lock().unwrap_or_else(|e| e.into_inner()).push(downloaded);

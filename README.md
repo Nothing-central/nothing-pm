@@ -20,6 +20,8 @@ every other package manager pings the internet for everything, every time, even 
 - **registry flexible** — supports npm and jsr, you choose per install
 - **lockfile that is a database** — `agree.db` records the exact tree, `nth lock json` exports it
 - **npm crate compatibility** — `optionalDependencies`, `peerDependencies` and `os`/`cpu`/`libc` guards are honoured
+- **runs package scripts** — `preinstall`/`install`/`postinstall`/`prepare` execute with `node_modules/.bin` on PATH
+- **populates `node_modules/.bin`** — so `npx next dev` and `npm run` find the tools you installed
 
 ---
 
@@ -139,6 +141,7 @@ any other time nothing package manager keeps its hands off the internet complete
 | `nth install axios, jsr @hono/hono` | mix npm and jsr in one command |
 | `nth i` | install all deps from package.json |
 | `nth i --forceall` | CI mode — no prompts, strict versions, no db writes |
+| `nth install --ignore-scripts` | install without running package lifecycle scripts |
 | `nth uninstall <pkg>` | remove a package from this project (stays in the store) |
 | `nth add <pkg>, <pkg>` | download packages to store without installing |
 | `nth add axios, jsr @hono/hono` | stock up from mixed registries in one command |
@@ -187,6 +190,46 @@ when two packages need different versions of the same dependency nothing package
   2. download both versions — everything works, costs extra 37mb in node_modules
 
 choose (1/2):
+```
+
+---
+
+## package scripts and `node_modules/.bin`
+
+unpacking a tarball is only half of an install. two more things happen, and both are what make `npx next dev` work afterwards.
+
+**binaries get linked.** every installed package that declares a `bin` field gets an entry in `node_modules/.bin` — a symlink on unix, a `.cmd` shim on windows. this is the folder `npx`, `npm run` and every `#!/usr/bin/env node` script searches, so `npx next build` finds next without any global install:
+
+```
+nth install next react react-dom
+
+5 command(s) linked into node_modules/.bin
+✓ 24 packages installed
+
+npx next --version
+Next.js v16.4.6
+```
+
+**lifecycle scripts run.** `preinstall`, `install`, `postinstall` and `prepare` run for every package that has them, dependencies first, with that package's `node_modules/.bin` on `PATH` so `node-gyp`, `esbuild`, `sharp` and friends find their tools:
+
+```
+✓ esbuild postinstall          done
+1 lifecycle script(s) ran
+```
+
+a failing script is reported, not fatal — the packages stay installed and the summary names who failed. this is the npm behaviour that lets one broken optional build step not take a whole tree down.
+
+skip all of it when you want a plain unpack (air-gapped machines, or a package you know is broken here):
+
+```bash
+nth i --ignore-scripts
+nth install sharp --ignore-scripts
+```
+
+**peer warnings.** `peerDependencies` are installed alongside the package that declares them, and when the tree ends up holding a version the peer range does not accept, nothing says so plainly instead of pretending everything is fine:
+
+```
+⚠ @tanstack/react-query 5.107.1 wants peer react ^18 || ^19 but 17.0.2 is installed — the tree may misbehave
 ```
 
 ---
@@ -351,6 +394,8 @@ nextjs 14.0.0       ██████████ done ✓
 do not use this in normal development. your local store is what makes nothing package manager fast and smart. `--forceall` throws all of that away on purpose.
 
 ---
+## what will come next when this gets stable engough
+See i am developer who i dont have internet always and i always just never understand how and why i need to install grdke the number of times i am setting up an android project so nothing will be more like a universal package manager for android projects python deps js libraries is it possible probabl yes with some hacking around but that is the vision when the js part becomes stable i move to android platform
 
 ## built with
 

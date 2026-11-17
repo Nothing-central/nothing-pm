@@ -23,11 +23,13 @@ const LOCAL_SIG: u32 = 0x0403_4b50;
 const CENTRAL_SIG: u32 = 0x0201_4b50;
 const EOCD_SIG: u32 = 0x0605_4b50;
 
-pub fn write_zip(entries: &[ZipEntry]) -> Vec<u8> {
+/// Takes ownership so a package's file data is moved into the archive
+/// instead of copied — a 150mb tarball would otherwise double in memory.
+pub fn write_zip(entries: Vec<ZipEntry>) -> Vec<u8> {
     let mut out: Vec<u8> = Vec::new();
     let mut central: Vec<u8> = Vec::new();
 
-    for entry in entries {
+    for entry in &entries {
         let name = entry.path.as_bytes();
         let crc = hash::crc32(&entry.data);
         let size = entry.data.len() as u32;
@@ -238,7 +240,7 @@ mod tests {
                 mode: 0o755,
             },
         ];
-        let zip = write_zip(&entries);
+        let zip = write_zip(entries);
         let back = read_zip(&zip).unwrap();
         assert_eq!(back.len(), 3);
         assert_eq!(back[1].path, "lib/index.js");

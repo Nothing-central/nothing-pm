@@ -36,7 +36,9 @@ impl Client {
     pub fn new() -> Client {
         let agent = ureq::AgentBuilder::new()
             .timeout_connect(Duration::from_secs(10))
-            .timeout(Duration::from_secs(120))
+            // A tarball like next or @next/swc is 40mb; on a slow link it
+            // needs more than two minutes. Transient errors still retry.
+            .timeout(Duration::from_secs(600))
             .user_agent(concat!(
                 "nth/",
                 env!("CARGO_PKG_VERSION"),

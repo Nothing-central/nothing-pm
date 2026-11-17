@@ -45,8 +45,15 @@ pub enum ClearPart {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
-    Install { specs: Vec<PackageSpec>, forceall: bool },
-    InstallAll { forceall: bool },
+    Install {
+        specs: Vec<PackageSpec>,
+        forceall: bool,
+        ignore_scripts: bool,
+    },
+    InstallAll {
+        forceall: bool,
+        ignore_scripts: bool,
+    },
     Uninstall { names: Vec<String> },
     Add { specs: Vec<PackageSpec> },
     UpdateDatabase,
@@ -72,10 +79,17 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     match sub {
         "install" | "i" | "add-install" => {
             let forceall = take_flag(&rest, &["--forceall", "--force-all", "-f"]);
+            let ignore_scripts = take_flag(
+                &rest,
+                &["--ignore-scripts", "--no-scripts", "--noscripts"],
+            );
             let positional: Vec<String> =
                 rest.iter().filter(|a| !is_flag(a)).cloned().collect();
             if positional.is_empty() {
-                Ok(Command::InstallAll { forceall })
+                Ok(Command::InstallAll {
+                    forceall,
+                    ignore_scripts,
+                })
             } else {
                 if forceall {
                     return Err("--forceall only applies when installing from package.json".into());
@@ -83,6 +97,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 Ok(Command::Install {
                     specs: parse_specs(&positional)?,
                     forceall: false,
+                    ignore_scripts,
                 })
             }
         }
@@ -366,11 +381,24 @@ mod tests {
     fn bare_install_means_everything() {
         assert_eq!(
             parse(&args("i")).unwrap(),
-            Command::InstallAll { forceall: false }
+            Command::InstallAll {
+                forceall: false,
+                ignore_scripts: false
+            }
         );
         assert_eq!(
             parse(&args("i --forceall")).unwrap(),
-            Command::InstallAll { forceall: true }
+            Command::InstallAll {
+                forceall: true,
+                ignore_scripts: false
+            }
+        );
+        assert_eq!(
+            parse(&args("i --ignore-scripts")).unwrap(),
+            Command::InstallAll {
+                forceall: false,
+                ignore_scripts: true
+            }
         );
     }
 

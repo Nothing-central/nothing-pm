@@ -11,7 +11,7 @@ use crate::resolver::{Plan, Root};
 use crate::ui;
 use std::path::Path;
 
-pub fn run_install(specs: Vec<PackageSpec>) -> Result<(), String> {
+pub fn run_install(specs: Vec<PackageSpec>, ignore_scripts: bool) -> Result<(), String> {
     let ctx = context()?;
     let project = project::project_root()?;
     let roots: Vec<Root> = specs
@@ -29,6 +29,7 @@ pub fn run_install(specs: Vec<PackageSpec>) -> Result<(), String> {
     ui::blank();
     ui::info("arranging folders...");
     let count = install_plan(&ctx, &plan, &node_modules, &downloaded, false)?;
+    finish_install(&project, &node_modules, &plan, ignore_scripts)?;
     record_dependencies(&project, &plan, &specs)?;
     refresh_lock(&ctx, &project);
 
@@ -37,7 +38,7 @@ pub fn run_install(specs: Vec<PackageSpec>) -> Result<(), String> {
     Ok(())
 }
 
-pub fn run_install_all(forceall: bool) -> Result<(), String> {
+pub fn run_install_all(forceall: bool, ignore_scripts: bool) -> Result<(), String> {
     let ctx = context()?;
     let project = project::project_root()?;
     let manifest = Manifest::read(&project.join("package.json"))?;
@@ -80,6 +81,10 @@ pub fn run_install_all(forceall: bool) -> Result<(), String> {
     ui::info("arranging folders...");
     let count = install_plan(&ctx, &plan, &node_modules, &downloaded, forceall)?;
 
+    if !forceall {
+        finish_install(&project, &node_modules, &plan, ignore_scripts)?;
+    }
+
     ui::blank();
     ui::ok(&format!("{count} packages installed"));
     if forceall {
@@ -115,6 +120,49 @@ pub fn run_add(specs: Vec<PackageSpec>) -> Result<(), String> {
             downloaded.len(),
             plan.store_hits()
         ));
+    }
+    Ok(())
+}
+
+/// Link `bin` entries and run lifecycle scripts for everything that just
+/// landed in node_modules. Dependencies come first: the plan is built
+/// breadth-first from the roots, so reversing it runs leaves before the
+/// packages that need their build output.
+fn finish_install(
+    project: &Path,
+    node_modules: &Path,
+    plan: &Plan,
+    ignore_scripts: bool,
+) -> Result<(), String> {
+    let mut installed: Vec<crate::scripts::Installed> = Vec::new();
+    for item in plan.primary() {
+        installed.push(crate::scripts::Installed {
+            name: item.name.clone(),
+            dir: installer::package_dir(node_modules, &item.name),
+            node_modules: node_modules.to_path_buf(),
+        });
+    }
+    for item in plan.items.iter().filter(|i| i.nested_under.is_some()) {
+        let requester = item.nested_under.clone().unwrap_or_default();
+        let nested = installer::package_dir(node_modules, &requester).join("node_modules");
+        installed.push(crate::scripts::Installed {
+            name: item.name.clone(),
+            dir: installer::package_dir(&nested, &item.name),
+            node_modules: nested,
+        });
+    }
+    installed.reverse();
+
+    ui::blank();
+    let linked = crate::scripts::link_bins(&installed)?;
+    if linked > 0 {
+        ui::info(&format!("{linked} command(s) linked into node_modules/.bin"));
+    }
+
+    if ignore_scripts {
+        ui::info("--ignore-scripts: package scripts were not run");
+    } else {
+        crate::scripts::run_lifecycle(project, &installed);
     }
     Ok(())
 }

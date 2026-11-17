@@ -135,6 +135,11 @@ fn run(apply: bool) -> Result<(), String> {
                     optional: false,
                 }))
                 .collect(),
+            peers: meta
+                .peer
+                .iter()
+                .map(|p| (p.name.clone(), p.range.clone()))
+                .collect(),
         });
     }
 

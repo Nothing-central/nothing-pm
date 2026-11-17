@@ -49,6 +49,9 @@ pub struct PlanItem {
     pub nested_under: Option<String>,
     /// Only reachable through `optionalDependencies`.
     pub optional: bool,
+    /// `peerDependencies` this version declares, kept only so the plan can
+    /// warn when the installed tree does not satisfy them.
+    pub peers: Vec<(String, String)>,
 }
 
 impl PlanItem {
@@ -385,6 +388,34 @@ impl<'a> Planner<'a> {
             ));
         }
 
+        // npm calls this the "unstable tree" warning: peers are installed
+        // automatically, but a conflict can still leave a version the
+        // declaring package cannot use.
+        for item in &items {
+            for (peer, range) in &item.peers {
+                match chosen.get(peer) {
+                    Some(&idx) => {
+                        let installed = &items[idx].version;
+                        if !satisfies(installed, Some(range)) {
+                            warnings.push(format!(
+                                "{} wants peer {} {} but {} is installed — the tree may misbehave",
+                                item.label(),
+                                peer,
+                                range,
+                                installed
+                            ));
+                        }
+                    }
+                    None => warnings.push(format!(
+                        "{} wants peer {} {} which is not installed — the tree may misbehave",
+                        item.label(),
+                        peer,
+                        range
+                    )),
+                }
+            }
+        }
+
         Ok(Plan {
             items,
             conflicts,
@@ -479,6 +510,7 @@ fn push_stored(items: &mut Vec<PlanItem>, stored: &StoredPackage, optional: bool
         in_store: true,
         nested_under: None,
         optional,
+        peers: stored.peers.clone(),
     });
     idx
 }
@@ -535,6 +567,11 @@ fn push_item(
         in_store,
         nested_under: nested_under.filter(|s| !s.is_empty()),
         optional,
+        peers: meta
+            .peer
+            .iter()
+            .map(|p| (p.name.clone(), p.range.clone()))
+            .collect(),
     });
     idx
 }

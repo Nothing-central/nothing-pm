@@ -30,8 +30,12 @@ pub fn tarball_to_zip(tarball: &[u8]) -> Result<BuildResult, String> {
     }
 
     let root = common_root(&entries);
-    let mut zip_entries = Vec::new();
-    for entry in &entries {
+    // The tar buffer is dead weight once parsed; drop it before building the
+    // zip so a big package (next is ~150mb unpacked) does not need both.
+    drop(tar_bytes);
+
+    let mut zip_entries = Vec::with_capacity(entries.len());
+    for entry in entries {
         if entry.is_dir {
             continue;
         }
@@ -48,7 +52,7 @@ pub fn tarball_to_zip(tarball: &[u8]) -> Result<BuildResult, String> {
         let mode = if entry.mode & 0o111 != 0 { 0o755 } else { 0o644 };
         zip_entries.push(ZipEntry {
             path,
-            data: entry.data.clone(),
+            data: entry.data,
             mode,
         });
     }
@@ -56,7 +60,7 @@ pub fn tarball_to_zip(tarball: &[u8]) -> Result<BuildResult, String> {
         return Err("tarball contains no regular files".into());
     }
 
-    let zip = zipstore::write_zip(&zip_entries);
+    let zip = zipstore::write_zip(zip_entries);
     let checksum = format!("sha256:{}", hash::sha256_hex(&zip));
     let size_kb = ((zip.len() as u64) / 1024).max(1);
     Ok(BuildResult {

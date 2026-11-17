@@ -41,14 +41,21 @@ pub fn context() -> Result<Context, String> {
 
 pub fn dispatch(cmd: Command) -> Result<(), String> {
     match cmd {
-        Command::Install { specs, forceall } => {
+        Command::Install {
+            specs,
+            forceall,
+            ignore_scripts,
+        } => {
             if forceall {
-                install::run_install_all(true)
+                install::run_install_all(true, ignore_scripts)
             } else {
-                install::run_install(specs)
+                install::run_install(specs, ignore_scripts)
             }
         }
-        Command::InstallAll { forceall } => install::run_install_all(forceall),
+        Command::InstallAll {
+            forceall,
+            ignore_scripts,
+        } => install::run_install_all(forceall, ignore_scripts),
         Command::Uninstall { names } => uninstall::run(names),
         Command::Add { specs } => install::run_add(specs),
         Command::UpdateDatabase => update::run_update(),
@@ -77,6 +84,7 @@ usage:
   nth install <pkg>, <pkg>     install packages into this project
   nth install jsr <pkg>        install from the jsr registry
   nth i [--forceall]           install everything in package.json
+  nth i --ignore-scripts       install without running package lifecycle scripts
   nth uninstall <pkg>          remove packages from this project
   nth add <pkg>, <pkg>         download to the store without installing
   nth update database          check every stored package and update it
@@ -245,6 +253,7 @@ pub fn fetch_plan(
             integrity: item.integrity.clone(),
             beta: item.beta,
             deps: item.deps.clone(),
+            peers: item.peers.clone(),
         })
         .collect();
 

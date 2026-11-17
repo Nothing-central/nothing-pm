@@ -42,7 +42,8 @@ CREATE TABLE IF NOT EXISTS packages (
   beta         INTEGER NOT NULL DEFAULT 0,
   optional     INTEGER NOT NULL DEFAULT 0,
   nested_under TEXT,
-  deps         TEXT NOT NULL DEFAULT '[]'
+  deps         TEXT NOT NULL DEFAULT '[]',
+  peers        TEXT NOT NULL DEFAULT '[]'
 );
 CREATE INDEX IF NOT EXISTS idx_lock_packages_name ON packages(name);
 "#;
@@ -59,6 +60,7 @@ pub struct LockedPackage {
     pub optional: bool,
     pub nested_under: Option<String>,
     pub deps: Vec<StoredDep>,
+    pub peers: Vec<(String, String)>,
 }
 
 pub struct Lockfile {
@@ -87,6 +89,7 @@ impl Lockfile {
             .map_err(|e| format!("cannot configure {}: {e}", path.display()))?;
         conn.execute_batch(SCHEMA)
             .map_err(|e| format!("cannot create lockfile schema: {e}"))?;
+        ensure_peers_column(&conn)?;
         Ok(Lockfile { path, conn })
     }
 
@@ -126,8 +129,8 @@ impl Lockfile {
                 self.conn
                     .execute(
                         "INSERT INTO packages
-                           (name, version, source, tarball, integrity, checksum, beta, optional, nested_under, deps)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                           (name, version, source, tarball, integrity, checksum, beta, optional, nested_under, deps, peers)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                         params![
                             item.name,
                             item.version,
@@ -139,6 +142,7 @@ impl Lockfile {
                             item.optional as i64,
                             item.nested_under,
                             db::deps_to_json(&item.deps),
+                            db::peers_to_json(&item.peers),
                         ],
                     )
                     .map_err(|e| format!("lockfile write failed for {}: {e}", item.name))?;
@@ -199,7 +203,7 @@ impl Lockfile {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT name, version, source, tarball, integrity, checksum, beta, optional, nested_under, deps
+                "SELECT name, version, source, tarball, integrity, checksum, beta, optional, nested_under, deps, peers
                  FROM packages ORDER BY id",
             )
             .map_err(|e| e.to_string())?;
@@ -207,6 +211,7 @@ impl Lockfile {
             .query_map([], |row| {
                 let source: String = row.get(2)?;
                 let deps_text: String = row.get(9)?;
+                let peers_text: String = row.get(10).unwrap_or_default();
                 Ok(LockedPackage {
                     name: row.get(0)?,
                     version: row.get(1)?,
@@ -218,6 +223,7 @@ impl Lockfile {
                     optional: row.get::<_, i64>(7)? != 0,
                     nested_under: row.get(8)?,
                     deps: db::deps_from_json(&deps_text),
+                    peers: db::peers_from_json(&peers_text),
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -268,6 +274,7 @@ impl Lockfile {
                 in_store,
                 nested_under: pkg.nested_under,
                 optional: pkg.optional,
+                peers: pkg.peers,
             });
         }
         Ok(Some(Plan::from_items(items)))
@@ -352,6 +359,29 @@ impl Lockfile {
     }
 }
 
+/// `agree.db` files written before 0.3.0 predate the peers column.
+fn ensure_peers_column(conn: &Connection) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(packages)")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| e.to_string())?;
+    let mut columns = Vec::new();
+    for row in rows {
+        columns.push(row.map_err(|e| e.to_string())?);
+    }
+    if columns.iter().any(|c| c == "peers") {
+        return Ok(());
+    }
+    conn.execute(
+        "ALTER TABLE packages ADD COLUMN peers TEXT NOT NULL DEFAULT '[]'",
+        [],
+    )
+    .map_err(|e| format!("cannot migrate lockfile: {e}"))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,6 +419,7 @@ mod tests {
             in_store: false,
             nested_under: None,
             optional: false,
+            peers: Vec::new(),
         });
         items.push(PlanItem {
             name: "@esbuild/darwin-arm64".into(),
@@ -402,6 +433,7 @@ mod tests {
             in_store: false,
             nested_under: None,
             optional: true,
+            peers: Vec::new(),
         });
         Plan::from_items(items)
     }

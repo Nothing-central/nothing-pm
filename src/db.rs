@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS packages (
   integrity    TEXT,
   active       INTEGER NOT NULL DEFAULT 1,
   deps         TEXT NOT NULL DEFAULT '[]',
+  peers        TEXT NOT NULL DEFAULT '[]',
   installed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (name, version)
@@ -61,10 +62,12 @@ pub struct StoredPackage {
     /// The version the last install selected for this package name.
     pub active: bool,
     pub deps: Vec<StoredDep>,
+    /// Declared `peerDependencies`, so a store hit can still warn about an
+    /// incompatible tree instead of silently installing it.
+    pub peers: Vec<(String, String)>,
 }
 
-const SELECT_COLUMNS: &str =
-    "name, version, prev_version, source, size_kb, beta, checksum, deps, tarball, integrity, active";
+const SELECT_COLUMNS: &str = "name, version, prev_version, source, size_kb, beta, checksum, deps, tarball, integrity, active, peers";
 
 pub struct Db {
     conn: Connection,
@@ -82,6 +85,7 @@ impl Db {
         conn.execute_batch(SCHEMA)
             .map_err(|e| format!("cannot create schema: {e}"))?;
         migrate_single_version(&conn)?;
+        ensure_peer_column(&conn)?;
         Ok(Db { conn })
     }
 
@@ -177,6 +181,7 @@ impl Db {
             None => None,
         };
         let deps_json = deps_to_json(&pkg.deps);
+        let peers_json = peers_to_json(&pkg.peers);
 
         self.conn
             .execute("UPDATE packages SET active = 0 WHERE name = ?1", params![pkg.name])
@@ -184,8 +189,8 @@ impl Db {
         self.conn
             .execute(
                 "INSERT INTO packages
-                   (name, version, prev_version, source, size_kb, beta, checksum, tarball, integrity, active, deps)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10)
+                   (name, version, prev_version, source, size_kb, beta, checksum, tarball, integrity, active, deps, peers)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10, ?11)
                  ON CONFLICT(name, version) DO UPDATE SET
                    prev_version = excluded.prev_version,
                    source = excluded.source,
@@ -196,6 +201,7 @@ impl Db {
                    integrity = COALESCE(excluded.integrity, packages.integrity),
                    active = 1,
                    deps = excluded.deps,
+                   peers = excluded.peers,
                    updated_at = CURRENT_TIMESTAMP",
                 params![
                     pkg.name,
@@ -207,7 +213,8 @@ impl Db {
                     pkg.checksum,
                     pkg.tarball,
                     pkg.integrity,
-                    deps_json
+                    deps_json,
+                    peers_json
                 ],
             )
             .map_err(|e| format!("db write failed for {}: {e}", pkg.name))?;
@@ -320,6 +327,20 @@ fn migrate_single_version(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// Stores from 0.2.0 have no peer column; add it without rewriting rows.
+fn ensure_peer_column(conn: &Connection) -> Result<(), String> {
+    let columns = table_columns(conn, "packages")?;
+    if columns.iter().any(|c| c == "peers") {
+        return Ok(());
+    }
+    conn.execute(
+        "ALTER TABLE packages ADD COLUMN peers TEXT NOT NULL DEFAULT '[]'",
+        [],
+    )
+    .map_err(|e| format!("cannot add peers column: {e}"))?;
+    Ok(())
+}
+
 fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>, String> {
     let mut stmt = conn
         .prepare(&format!("PRAGMA table_info({table})"))
@@ -337,6 +358,7 @@ fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>, String> 
 fn row_to_package(row: &rusqlite::Row<'_>) -> Result<StoredPackage, String> {
     let source_text: String = row.get(3).map_err(|e| e.to_string())?;
     let deps_text: String = row.get(7).map_err(|e| e.to_string())?;
+    let peers_text: String = row.get(11).unwrap_or_default();
     Ok(StoredPackage {
         name: row.get(0).map_err(|e| e.to_string())?,
         version: row.get(1).map_err(|e| e.to_string())?,
@@ -349,6 +371,7 @@ fn row_to_package(row: &rusqlite::Row<'_>) -> Result<StoredPackage, String> {
         integrity: row.get(9).map_err(|e| e.to_string())?,
         active: row.get::<_, Option<i64>>(10).unwrap_or(None).unwrap_or(1) != 0,
         deps: deps_from_json(&deps_text),
+        peers: peers_from_json(&peers_text),
     })
 }
 
@@ -379,6 +402,35 @@ pub(crate) fn deps_to_json(deps: &[StoredDep]) -> String {
         })
         .collect();
     Json::Arr(items).to_string()
+}
+
+pub(crate) fn peers_to_json(peers: &[(String, String)]) -> String {
+    let items: Vec<Json> = peers
+        .iter()
+        .map(|(name, range)| Json::obj(vec![("name", Json::s(name)), ("range", Json::s(range))]))
+        .collect();
+    Json::Arr(items).to_string()
+}
+
+pub(crate) fn peers_from_json(text: &str) -> Vec<(String, String)> {
+    let parsed = match Json::parse(text) {
+        Ok(j) => j,
+        Err(_) => return Vec::new(),
+    };
+    parsed
+        .as_arr()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    Some((
+                        item.str_at("name")?.to_string(),
+                        item.str_at("range").unwrap_or("*").to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub(crate) fn deps_from_json(text: &str) -> Vec<StoredDep> {
@@ -445,6 +497,7 @@ mod tests {
                 checksum: None,
                 optional: false,
             }],
+            peers: vec![("react".into(), "^19".into())],
         }
     }
 
