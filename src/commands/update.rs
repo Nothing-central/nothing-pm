@@ -43,7 +43,53 @@ pub fn run_check() -> Result<(), String> {
 }
 
 pub fn run_update() -> Result<(), String> {
-    run(true)
+    let outcome = run(true);
+    // Even when the store had nothing to update (or the registry was
+    // unreachable), it is worth saying whether nth itself is current.
+    check_self_update();
+    outcome
+}
+
+/// `nth update` also reports whether nothing package manager itself has a
+/// newer release. It never replaces the running binary: the installer is the
+/// upgrade path, and overwriting an executable needs root on most systems.
+fn check_self_update() {
+    const LATEST: &str =
+        "https://api.github.com/repos/Nothing-central/nothing-pm/releases/latest";
+    let client = Client::new();
+    let json = match client.get_json(LATEST) {
+        // Offline, rate limited, or no release published yet: stay quiet
+        // rather than turning an update run into an error.
+        Ok(json) => json,
+        Err(_) => return,
+    };
+    let tag = match json.str_at("tag_name") {
+        Some(tag) => tag.trim_start_matches('v'),
+        None => return,
+    };
+    let current = env!("CARGO_PKG_VERSION");
+    let latest = match Version::parse(tag) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let mine = match Version::parse(current) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    ui::blank();
+    if latest > mine {
+        ui::warn(&format!(
+            "nothing package manager {tag} is available (you have {current})"
+        ));
+        ui::info("  upgrade with the installer:");
+        ui::info("  curl -fsSL https://raw.githubusercontent.com/Nothing-central/nothing-pm/main/install.sh | bash");
+        ui::info("  windows: irm https://raw.githubusercontent.com/Nothing-central/nothing-pm/main/install.ps1 | iex");
+    } else {
+        ui::info(&format!(
+            "nothing package manager {current} is the latest release"
+        ));
+    }
 }
 
 fn run(apply: bool) -> Result<(), String> {
@@ -90,9 +136,9 @@ fn run(apply: bool) -> Result<(), String> {
         return Ok(());
     }
 
-    // Move each current zip into prev/ before the new version lands, then
-    // let the download pool write the replacements and the db writer move
-    // the version fields forward.
+    // Each new version gets its own zip; the download writer stores it and
+    // moves the db's active marker forward, leaving the old version intact
+    // for rollback.
     let mut jobs = Vec::new();
     for candidate in &available {
         let meta = match &candidate.latest {

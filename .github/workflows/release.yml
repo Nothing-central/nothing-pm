@@ -25,7 +25,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # 22.04 ships glibc 2.35. Building on ubuntu-latest (24.04) needed
+          # GLIBC_2.39, which fails to load on older distros.
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             asset: nth-linux-x86_64
             archive: tar.gz

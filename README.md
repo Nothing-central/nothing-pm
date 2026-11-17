@@ -146,6 +146,7 @@ any other time nothing package manager keeps its hands off the internet complete
 | `nth add <pkg>, <pkg>` | download packages to store without installing |
 | `nth add axios, jsr @hono/hono` | stock up from mixed registries in one command |
 | `nth update database` | check all stored packages for updates |
+| `nth update` | update the store, and tell you when nothing package manager itself has a newer release |
 | `nth check updates` | see what updates are available without installing |
 | `nth view db` | see every version in your local store, and which is active |
 | `nth delete <pkg>` | remove a package from the store completely |

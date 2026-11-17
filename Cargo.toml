@@ -1,6 +1,6 @@
 [package]
 name = "nth"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 description = "nothing package manager — smart offline-first installer for Node, Bun and Deno"
 license = "MIT"

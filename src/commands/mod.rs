@@ -88,6 +88,7 @@ usage:
   nth uninstall <pkg>          remove packages from this project
   nth add <pkg>, <pkg>         download to the store without installing
   nth update database          check every stored package and update it
+  nth update                   same, and reports a newer nothing package manager
   nth check updates            show available updates, download nothing
   nth view db                  list everything in the store
   nth delete <pkg>             remove a package from the store
