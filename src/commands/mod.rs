@@ -8,6 +8,7 @@ pub mod info;
 pub mod init;
 pub mod install;
 pub mod lock;
+pub mod save;
 pub mod store_ops;
 pub mod uninstall;
 pub mod update;
@@ -66,6 +67,8 @@ pub fn dispatch(cmd: Command) -> Result<(), String> {
         Command::Info => info::run(),
         Command::Lock { json } => lock::run(json),
         Command::Init => init::run(),
+        Command::Save { file } => save::run_save(file),
+        Command::RunScript { file } => save::run_replay(file),
         Command::Help => {
             println!("{HELP}");
             Ok(())
@@ -99,6 +102,9 @@ usage:
   nth lock                     show agree.db, the project lockfile
   nth lock json               write agree.json, the same lockfile as json
   nth init                     create a starter package.json
+  nth save [file]              write this project's install recipe (default nth-setup.txt)
+  nth run <file>               replay a saved recipe, no prompts — rebuild any app
+  add -y or NTH_YES=1          answer every prompt automatically (e.g. `nth i -y`)
 
 the store lives in /local (or $HOME/local, or $NTH_STORE when set).
 nothing package manager only contacts a registry when a package is missing from the store —
