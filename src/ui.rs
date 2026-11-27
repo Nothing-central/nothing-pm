@@ -77,11 +77,34 @@ pub fn size(kb: u64) -> String {
 
 /// Prompts only make sense with a real terminal. In a pipeline or CI run
 /// nothing must never sit waiting for input nobody can type.
+///
+/// `NTH_YES=1` (or `nth i -y`) makes every prompt answer itself — the
+/// default/first option is taken without ever reading stdin — so a big
+/// install that would normally ask twenty-seven times finishes untouched.
 pub fn interactive() -> bool {
+    if yes_mode() {
+        return false;
+    }
     io::stdin().is_terminal() && io::stdout().is_terminal()
 }
 
+/// Answer-everything mode: set once by the CLI when `-y`/`--yes` is passed
+/// or `NTH_YES` is in the environment.
+pub fn set_yes(on: bool) {
+    YES.store(on, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn yes_mode() -> bool {
+    YES.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+static YES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn confirm(question: &str) -> bool {
+    if yes_mode() {
+        println!("{question} (y/n): y  [auto, --yes]");
+        return true;
+    }
     if !interactive() {
         return false;
     }
@@ -97,6 +120,14 @@ pub fn confirm(question: &str) -> bool {
 /// Returns the 1-based index of the chosen option, or None if the answer
 /// was not one of them.
 pub fn choose(question: &str, options: &[&str]) -> Option<usize> {
+    if yes_mode() {
+        // Answer-everything mode: take the default (first) option and say
+        // so on the line, so the log still shows what was picked.
+        if let Some(first) = options.first() {
+            println!("{question}\n  chose 1. {first}  [auto, --yes]");
+        }
+        return Some(1);
+    }
     if !interactive() {
         return None;
     }
