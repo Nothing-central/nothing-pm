@@ -128,7 +128,7 @@ pub fn run_add(specs: Vec<PackageSpec>) -> Result<(), String> {
 /// landed in node_modules. Dependencies come first: the plan is built
 /// breadth-first from the roots, so reversing it runs leaves before the
 /// packages that need their build output.
-fn finish_install(
+pub fn finish_install(
     project: &Path,
     node_modules: &Path,
     plan: &Plan,

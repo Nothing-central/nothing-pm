@@ -64,8 +64,24 @@ pub enum Command {
     Info,
     Lock { json: bool },
     Init,
+    /// `nth save` — write this project's install recipe to a script.
+    Save { file: Option<String> },
+    /// `nth run <script>` / `nth do <script>` — replay a saved script.
+    RunScript { file: String },
     Help,
     Version,
+}
+
+/// True when the user asked nth to answer every prompt for itself.
+fn yes_requested(args: &[String]) -> bool {
+    take_flag(args, &["--yes", "-y"]) || yes_from_env()
+}
+
+fn yes_from_env() -> bool {
+    match std::env::var("NTH_YES") {
+        Ok(v) => !matches!(v.trim().to_lowercase().as_str(), "" | "0" | "false" | "no"),
+        Err(_) => false,
+    }
 }
 
 pub fn parse(args: &[String]) -> Result<Command, String> {
@@ -75,6 +91,8 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         None => return Ok(Command::Help),
     };
     let rest: Vec<String> = iter.cloned().collect();
+    // `-y` / `--yes` / NTH_YES switch every later prompt to auto-answer.
+    crate::ui::set_yes(yes_requested(&rest));
 
     match sub {
         "install" | "i" | "add-install" => {
@@ -83,8 +101,11 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 &rest,
                 &["--ignore-scripts", "--no-scripts", "--noscripts"],
             );
-            let positional: Vec<String> =
-                rest.iter().filter(|a| !is_flag(a)).cloned().collect();
+            let positional: Vec<String> = rest
+                .iter()
+                .filter(|a| !is_flag(a))
+                .cloned()
+                .collect();
             if positional.is_empty() {
                 Ok(Command::InstallAll {
                     forceall,
@@ -160,6 +181,31 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             )),
         },
         "init" => Ok(Command::Init),
+        "save" => {
+            let file = rest
+                .iter()
+                .find(|a| !is_flag(a))
+                .cloned();
+            if let Some(unknown) = rest.iter().find(|a| is_flag(a)) {
+                return Err(format!(
+                    "unknown save option '{unknown}' — try `nth save [file]`"
+                ));
+            }
+            Ok(Command::Save { file })
+        }
+        "run" | "do" => {
+            let positional: Vec<String> =
+                rest.iter().filter(|a| !is_flag(a)).cloned().collect();
+            match positional.len() {
+                0 => Err("nth run needs a script, e.g. `nth run nth-setup.txt`".into()),
+                1 => Ok(Command::RunScript {
+                    file: positional[0].clone(),
+                }),
+                n => Err(format!(
+                    "nth run takes one script file, got {n} — try `nth run <file>`"
+                )),
+            }
+        }
         "help" | "--help" | "-h" => Ok(Command::Help),
         "version" | "--version" | "-V" => Ok(Command::Version),
         other => Err(format!("unknown command '{other}' — run `nth help`")),
@@ -167,7 +213,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
 }
 
 fn is_flag(arg: &str) -> bool {
-    arg.starts_with("--")
+    arg.starts_with('-')
 }
 
 fn take_flag(args: &[String], names: &[&str]) -> bool {
@@ -452,5 +498,45 @@ mod tests {
     fn rejects_bad_names() {
         assert!(parse(&args("install UPPER")).is_err());
         assert!(parse(&args("install @scope")).is_err());
+    }
+
+    #[test]
+    fn yes_flag_is_not_a_package() {
+        let cmd = parse(&args("install axios -y")).unwrap();
+        match cmd {
+            Command::Install { specs, .. } => {
+                assert_eq!(specs.len(), 1);
+                assert_eq!(specs[0].name, "axios");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        crate::ui::set_yes(false);
+    }
+
+    #[test]
+    fn parses_save_and_run() {
+        assert_eq!(
+            parse(&args("save")).unwrap(),
+            Command::Save { file: None }
+        );
+        assert_eq!(
+            parse(&args("save my-setup.txt")).unwrap(),
+            Command::Save {
+                file: Some("my-setup.txt".into())
+            }
+        );
+        assert_eq!(
+            parse(&args("run my-setup.txt")).unwrap(),
+            Command::RunScript {
+                file: "my-setup.txt".into()
+            }
+        );
+        assert_eq!(
+            parse(&args("do my-setup.txt")).unwrap(),
+            Command::RunScript {
+                file: "my-setup.txt".into()
+            }
+        );
+        assert!(parse(&args("run")).is_err());
     }
 }
